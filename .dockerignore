@@ -1,0 +1,15 @@
+.git
+node_modules
+dist
+coverage
+artifacts
+playwright-report
+test-results
+data
+config
+config.yaml
+.env
+*.log
+.DS_Store
+EXTRACTION.md
+SHA256SUMS
