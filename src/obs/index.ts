@@ -1,10 +1,5 @@
-import { pino, type DestinationStream, type Level } from 'pino';
-import type { Config } from '../config/index.js';
-import type { Repository } from '../db/repository.js';
-import type { DigestController } from '../features/digest/index.js';
-import type { LanguageDiagnostic } from '../lang/contracts.js';
-import type { Operation } from '../ai/protocol.js';
-export type AppLogger = ReturnType<typeof createLogger>;
+import { pino } from 'pino';
+import type { DestinationStream } from 'pino';
 import { Counter, Gauge, Histogram, Registry } from '@prometheus-io/client';
 import { z } from 'zod';
 import {
@@ -12,8 +7,12 @@ import {
   digestOperations,
   lastErrorSchema,
 } from '../db/documents.js';
+import type { AiOperation, FeatureKind, TaskType } from '../db/documents.js';
 import { safeId } from '../config/primitives.js';
+import type { Repository } from '../db/repository.js';
 import { languageDiagnosticSchema } from '../lang/contracts.js';
+import type { LanguageDiagnostic } from '../lang/contracts.js';
+
 const events = z.enum([
   'service_started',
   'service_stopped',
@@ -71,12 +70,16 @@ const fieldsSchema = z
   })
   .strict();
 export function createLogger(
-  level: Config['logging']['level'],
+  level: 'debug' | 'info' | 'warn' | 'error',
   destination?: DestinationStream,
 ) {
   const logger = pino({ level, base: null }, destination);
   return {
-    log(severity: Level, event: string, fields: Record<string, unknown> = {}) {
+    log(
+      severity: 'debug' | 'info' | 'warn' | 'error',
+      event: z.infer<typeof events>,
+      fields: z.infer<typeof fieldsSchema> = {},
+    ) {
       const parsed = fieldsSchema.safeParse(fields),
         name = events.safeParse(event);
       if (!parsed.success || !name.success) {
@@ -87,15 +90,19 @@ export function createLogger(
     },
   };
 }
-const taskTypes = ['generate_artifacts', 'render', 'digest', 'ingest_backfill'];
+export type SafeLogger = ReturnType<typeof createLogger>;
+const taskTypes = [
+  'generate_artifacts',
+  'render',
+  'digest',
+  'ingest_backfill',
+] as const;
 export class Metrics {
-  models;
-  registry = new Registry();
-  counters = new Map<string, Counter<string>>();
-  gauges = new Map<string, Gauge<string>>();
-  histograms = new Map<string, Histogram<string>>();
-  constructor(models: Set<string>) {
-    this.models = models;
+  readonly registry = new Registry();
+  private readonly counters = new Map<string, Counter<string>>();
+  private readonly gauges = new Map<string, Gauge<string>>();
+  private readonly histograms = new Map<string, Histogram<string>>();
+  constructor(private readonly models: Set<string>) {
     for (const [name, labels] of Object.entries({
       tasks_total: ['type', 'outcome'],
       tasks_dead_total: ['type'],
@@ -146,7 +153,7 @@ export class Metrics {
       ['ai_request_bytes', [], [1024, 4096, 16384, 65536, 262144, 1048576]],
       ['entry_content_units', [], [0, 20, 100, 200, 600, 2000, 10000, 100000]],
       ['language_detection_duration_seconds', [], [0.001, 0.01, 0.1, 1, 5, 10]],
-    ] as [string, string[], number[]][])
+    ] as Array<[string, string[], number[]]>)
       this.histograms.set(
         name,
         new Histogram({
@@ -160,11 +167,11 @@ export class Metrics {
   }
   ai(
     model: string,
-    operation: Operation,
-    mode: string,
-    outcome: string,
+    operation: AiOperation,
+    mode: 'joint' | 'single',
+    outcome: 'succeeded' | 'failed',
     bytes: number,
-  ) {
+  ): void {
     if (
       !this.models.has(model) ||
       ![...artifactOperations, ...digestOperations, 'detect_language'].includes(
@@ -181,7 +188,7 @@ export class Metrics {
       .inc({ model, operation, mode, outcome });
     this.histograms.get('ai_request_bytes')!.observe(bytes);
   }
-  language(diagnostic: LanguageDiagnostic) {
+  language(diagnostic: LanguageDiagnostic): void {
     const { source, outcome, reason, duration_ms } =
       languageDiagnosticSchema.parse(diagnostic);
     this.counters
@@ -191,12 +198,12 @@ export class Metrics {
       .get('language_detection_duration_seconds')!
       .observe(duration_ms / 1000);
   }
-  degradation(level: number) {
+  degradation(level: number): void {
     if (!Number.isInteger(level) || level < 1 || level > 6)
       throw new Error('invalid_metric_labels');
     this.counters.get('ai_degradation_total')!.inc({ level: String(level) });
   }
-  miniflux(endpoint: string, status: string) {
+  miniflux(endpoint: string, status: string): void {
     if (
       !/^\/v1\/(version|me|categories|entries(?:(?:\/:id))?|feeds(?:\/:id(?:\/entries\/import)?)?)$/.test(
         endpoint,
@@ -206,13 +213,16 @@ export class Metrics {
       throw new Error('invalid_metric_labels');
     this.counters.get('miniflux_requests_total')!.inc({ endpoint, status });
   }
-  rendered() {
+  rendered(): void {
     this.counters.get('entries_rendered_total')!.inc();
   }
-  recovery(outcome: string) {
+  recovery(
+    outcome:
+      'unchanged' | 'restored' | 'regenerated' | 'busy' | 'missing' | 'failed',
+  ): void {
     this.counters.get('entry_recovery_total')!.inc({ outcome });
   }
-  rejected(source: string, reason: string) {
+  rejected(source: 'poll' | 'backfill', reason: string): void {
     if (
       !['poll', 'backfill'].includes(source) ||
       ![
@@ -224,7 +234,7 @@ export class Metrics {
       throw new Error('invalid_metric_labels');
     this.counters.get('ingest_rejected_entries_total')!.inc({ source, reason });
   }
-  exclusion(job: string, reason: string) {
+  exclusion(job: string, reason: string): void {
     if (
       !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(job) ||
       ![
@@ -239,7 +249,7 @@ export class Metrics {
       .get('digest_candidate_exclusions_total')!
       .inc({ job_id: job, reason });
   }
-  admission(kind: string, outcome: string) {
+  admission(kind: FeatureKind, outcome: string): void {
     if (outcome === 'scope_denied')
       this.counters
         .get('feature_admission_denials_total')!
@@ -255,7 +265,7 @@ export class Metrics {
         .get('feature_skips_total')!
         .inc({ feature: kind, reason: outcome });
   }
-  feature(kind: string, state: string) {
+  feature(kind: FeatureKind, state: string): void {
     if (
       !['translation', 'summary'].includes(kind) ||
       ![
@@ -272,7 +282,7 @@ export class Metrics {
       .get('feature_state_transitions_total')!
       .inc({ feature: kind, to: state });
   }
-  task(type: string, outcome: string, durationMs: number) {
+  task(type: TaskType, outcome: string, durationMs: number): void {
     if (
       !taskTypes.includes(type) ||
       !['done', 'dead', 'pending'].includes(outcome)
@@ -285,7 +295,7 @@ export class Metrics {
       .get('task_duration_seconds')!
       .observe({ type }, durationMs / 1000);
   }
-  digest(job: string, partition: string, outcome: string) {
+  digest(job: string, partition: string, outcome: string): void {
     if (
       !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(job) ||
       !/^(all|category:[1-9]\d*)$/.test(partition) ||
@@ -296,13 +306,22 @@ export class Metrics {
       .get('digest_runs_total')!
       .inc({ job_id: job, partition_key: partition, outcome });
   }
-  sourceUnits(units: number) {
+  sourceUnits(units: number): void {
     this.histograms.get('entry_content_units')!.observe(units);
   }
   refresh(
     repository: Repository,
-    digest: ReturnType<DigestController['status']>,
-  ) {
+    digest: {
+      state: string;
+      output_feeds: Array<{
+        job_id: string;
+        partition_key: string;
+        state: string;
+        awaiting_output_feed_run_count: number;
+        oldest_awaiting_output_feed_since: number | null;
+      }>;
+    },
+  ): void {
     for (const type of taskTypes)
       this.gauges
         .get('tasks_inflight')!

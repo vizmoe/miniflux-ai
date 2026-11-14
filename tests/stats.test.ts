@@ -6,7 +6,7 @@ import {
 } from '../src/ai/stats.js';
 import { zeroDigestStats } from '../src/db/documents.js';
 import type { DigestStats } from '../src/db/types.js';
-import type { CallStat } from '../src/generation/types.js';
+import type { CallStat } from '../src/ai/client.js';
 
 const call: CallStat = {
   provider_id: 'primary',

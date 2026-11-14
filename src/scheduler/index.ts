@@ -1,50 +1,48 @@
 import { Cron } from 'croner';
-interface SchedulerCallbacks {
+import { ENTRY_RECOVERY_TICK_MS } from '../config/constants.js';
+
+export interface SchedulerCallbacks {
   gate(): boolean;
   verify(): Promise<unknown>;
-  bootstrap(): Promise<unknown>;
-  poll(signal: AbortSignal): Promise<unknown>;
-  recoverEntries(signal: AbortSignal): Promise<unknown>;
-  resumeWindows(): Promise<unknown>;
-  reconcileFeeds(): Promise<unknown>;
-  activate(): Promise<unknown>;
-  summaries(): Promise<unknown>;
-  digest(id: string, occurrence: Date): Promise<unknown>;
+  bootstrap(): Promise<void>;
+  poll(signal: AbortSignal): Promise<void>;
+  recoverEntries(signal: AbortSignal): Promise<void>;
+  resumeWindows(): Promise<void>;
+  reconcileFeeds(): Promise<void>;
+  activate(): Promise<void>;
+  summaries(): Promise<void>;
+  digest(jobId: string, occurrence: Date): Promise<void>;
   failed(operation: string): void;
 }
-interface SchedulerConfig {
-  pollIntervalMs: number;
-  summaryCron: string | null;
-  digestCrons: { id: string; cron: string }[];
-}
-import { ENTRY_RECOVERY_TICK_MS } from '../config/constants.js';
 /** Owns cross-module time/event delivery. Module callbacks own transactions. */
 export class Scheduler {
-  callbacks;
-  config;
-  controller = new AbortController();
-  crons: Cron[] = [];
-  pollTimer?: NodeJS.Timeout;
-  retryTimer?: NodeJS.Timeout;
-  recoveryTimer?: NodeJS.Timeout;
-  activationFlight?: Promise<void>;
-  activationRequested = false;
-  polling = false;
-  startupFlight?: Promise<void>;
-  initialized = false;
-  pending = new Set<Promise<unknown>>();
-  constructor(callbacks: SchedulerCallbacks, config: SchedulerConfig) {
-    this.callbacks = callbacks;
-    this.config = config;
-  }
-  run(operation: string, work: () => Promise<unknown>) {
+  private readonly controller = new AbortController();
+  private readonly crons: Cron[] = [];
+  private pollTimer?: ReturnType<typeof setInterval>;
+  private retryTimer?: ReturnType<typeof setInterval>;
+  private recoveryTimer?: ReturnType<typeof setInterval>;
+  private activationFlight?: Promise<void>;
+  private activationRequested = false;
+  private polling = false;
+  private startupFlight?: Promise<void>;
+  private initialized = false;
+  private readonly pending = new Set<Promise<void>>();
+  constructor(
+    private readonly callbacks: SchedulerCallbacks,
+    private readonly config: {
+      pollIntervalMs: number;
+      summaryCron: string | null;
+      digestCrons: Array<{ id: string; cron: string }>;
+    },
+  ) {}
+  private run(operation: string, work: () => Promise<void>): void {
     if (this.controller.signal.aborted) return;
     const promise = work()
       .catch(() => this.callbacks.failed(operation))
       .finally(() => this.pending.delete(promise));
     this.pending.add(promise);
   }
-  start() {
+  start(): void {
     this.run('startup', () => this.initialize());
     this.recoveryTimer = setInterval(() => {
       if (this.initialized && this.callbacks.gate())
@@ -109,14 +107,14 @@ export class Scheduler {
     });
     return this.startupFlight;
   }
-  recovered() {
+  recovered(): void {
     this.run('recovery', async () => {
       await this.initialize();
       await this.callbacks.reconcileFeeds();
       await this.requestActivation();
     });
   }
-  async poll() {
+  private async poll(): Promise<void> {
     if (this.polling || !this.callbacks.gate()) return;
     this.polling = true;
     try {
@@ -135,7 +133,7 @@ export class Scheduler {
       }
     }
   }
-  requestActivation() {
+  requestActivation(): Promise<void> {
     if (this.controller.signal.aborted || !this.callbacks.gate())
       return Promise.resolve();
     this.activationRequested = true;
@@ -154,14 +152,14 @@ export class Scheduler {
     });
     return this.activationFlight;
   }
-  stop() {
+  stop(): void {
     this.controller.abort();
     this.crons.forEach((cron) => cron.stop());
     if (this.pollTimer) clearInterval(this.pollTimer);
     if (this.retryTimer) clearInterval(this.retryTimer);
     if (this.recoveryTimer) clearInterval(this.recoveryTimer);
   }
-  async drained() {
+  async drained(): Promise<void> {
     await Promise.allSettled([
       ...this.pending,
       ...(this.activationFlight ? [this.activationFlight] : []),

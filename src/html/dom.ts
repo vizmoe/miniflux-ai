@@ -1,38 +1,36 @@
 import { parseHTML } from 'linkedom';
 import { parse, serialize } from 'parse5';
+
 /** HTML5 tree construction precedes the linkedom editing/extraction surface. */
-export function parseSource(content: string) {
+export function parseSource(content: string): HTMLElement {
   const normalized = serialize(parse(`<body>${content}</body>`));
-  return parseHTML(normalized).document.body;
+  return parseHTML(normalized).document.body as unknown as HTMLElement;
 }
-export function serializeSource(root: Element) {
+export function serializeSource(root: HTMLElement): string {
   return root.innerHTML;
 }
 export function isElement(node: Node): node is Element {
   return node.nodeType === 1;
 }
-export function meaningfulChildren(node: Node) {
+export function meaningfulChildren(node: Node): Node[] {
   return Array.from(node.childNodes).filter(
     (n) => n.nodeType !== 3 || Boolean(n.textContent?.trim()),
   );
 }
-export function escapeHtml(value: string) {
+export function escapeHtml(value: string): string {
   return value.replace(
     /[&<>"']/g,
     (c) =>
       ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[
-        c as '&' | '<' | '>' | '"' | "'"
-      ],
+        c
+      ]!,
   );
 }
-export type CanonicalNode =
-  | { text: string }
-  | { tag: string; attributes: [string, string][]; children: CanonicalNode[] };
 export function canonicalTree(
-  root: Element,
-  attributes?: (element: Element) => [string, string][],
-) {
-  const visit = (node: Node): CanonicalNode | null => {
+  root: Node,
+  attributes?: (e: Element) => Array<[string, string]>,
+): unknown {
+  const visit = (node: Node): unknown => {
     if (node.nodeType === 3)
       return {
         text: (node.textContent ?? '').normalize('NFC').replace(/\s+/gu, ' '),

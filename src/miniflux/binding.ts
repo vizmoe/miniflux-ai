@@ -1,51 +1,40 @@
-import type { Repository } from '../db/repository.js';
-import type { MinifluxClient } from './client.js';
-import type { Binding } from '../db/types.js';
-export interface BindingStatus {
-  ready: boolean;
-  reason: string | null;
-  version: string | null;
-}
 import {
   MINIFLUX_SUPPORTED_VERSION,
   MINIFLUX_VERSION_PROBE_TTL,
 } from '../config/constants.js';
 import { normalizeBaseUrl } from '../config/primitives.js';
 import { ApiError, WorkError } from '../obs/errors.js';
-function bindingFailure(error: unknown) {
+import type { Repository } from '../db/repository.js';
+import type { MinifluxClient } from './client.js';
+
+export interface CoreStatus {
+  ready: boolean;
+  reason: string | null;
+  version: string | null;
+}
+function bindingFailure(error: unknown): string {
   if (error instanceof ApiError) return error.code;
   if (error instanceof WorkError) return error.detail.code;
   return 'repository_unavailable';
 }
 export class BindingController {
-  repository;
-  client;
-  baseUrl;
-  recovered;
-  now;
-  verified = false;
-  cache?: { at: number; status: BindingStatus };
-  inFlight?: Promise<BindingStatus>;
-  timer?: NodeJS.Timeout;
-  stopped = false;
-  controller = new AbortController();
+  private verified = false;
+  private cache: { status: CoreStatus; at: number } | undefined;
+  private inFlight: Promise<CoreStatus> | undefined;
+  private timer?: ReturnType<typeof setTimeout>;
+  private stopped = false;
+  private readonly controller = new AbortController();
   constructor(
-    repository: Repository,
-    client: MinifluxClient,
-    baseUrl: string,
-    recovered = () => {},
-    now = Date.now,
-  ) {
-    this.repository = repository;
-    this.client = client;
-    this.baseUrl = baseUrl;
-    this.recovered = recovered;
-    this.now = now;
-  }
-  get open() {
+    private readonly repository: Repository,
+    private readonly client: MinifluxClient,
+    readonly baseUrl: string,
+    private readonly recovered: () => void = () => {},
+    private readonly now: () => number = Date.now,
+  ) {}
+  get open(): boolean {
     return this.verified && this.lastStatus.ready && !this.stopped;
   }
-  get state() {
+  get state(): string {
     const binding = this.repository.binding();
     if (!binding) return 'unbound';
     if (binding.base_url !== this.baseUrl)
@@ -55,12 +44,12 @@ export class BindingController {
       ? 'account_mismatch'
       : 'verifying';
   }
-  lastStatus: BindingStatus = {
+  lastStatus: CoreStatus = {
     ready: false,
     reason: 'miniflux_unavailable',
     version: null,
   };
-  async check(): Promise<BindingStatus> {
+  async check(): Promise<CoreStatus> {
     if (this.cache && this.now() - this.cache.at < MINIFLUX_VERSION_PROBE_TTL)
       return this.cache.status;
     if (this.inFlight) return this.inFlight;
@@ -69,7 +58,7 @@ export class BindingController {
     });
     return this.inFlight;
   }
-  async supportedVersion() {
+  private async supportedVersion(): Promise<string> {
     const version = await this.client.version(this.controller.signal);
     if (version !== MINIFLUX_SUPPORTED_VERSION)
       throw new WorkError(
@@ -79,7 +68,9 @@ export class BindingController {
       );
     return version;
   }
-  async verifyAccount(stored?: Binding) {
+  private async verifyAccount(
+    stored: ReturnType<Repository['binding']>,
+  ): Promise<void> {
     const userId = await this.client.me(this.controller.signal);
     this.controller.signal.throwIfAborted();
     if (stored && stored.user_id !== userId)
@@ -92,7 +83,7 @@ export class BindingController {
       });
     this.verified = true;
   }
-  async probe() {
+  private async probe(): Promise<CoreStatus> {
     const wasReady = this.lastStatus.ready;
     try {
       const stored = this.repository.binding();
@@ -120,12 +111,12 @@ export class BindingController {
     }
     return this.lastStatus;
   }
-  requireOpen() {
+  requireOpen(): void {
     if (!this.open)
       throw new ApiError(503, this.lastStatus.reason ?? 'miniflux_unavailable');
   }
-  async confirm(url: string) {
-    let normalized;
+  async confirm(url: string): Promise<unknown> {
+    let normalized: string;
     try {
       normalized = normalizeBaseUrl(url);
     } catch {
@@ -140,8 +131,8 @@ export class BindingController {
       const version = await this.supportedVersion();
       const userId = await this.client.me(this.controller.signal);
       this.controller.signal.throwIfAborted();
-      const next: Binding = {
-        schema_version: 1,
+      const next = {
+        schema_version: 1 as const,
         base_url: this.baseUrl,
         user_id: userId,
       };
@@ -159,7 +150,7 @@ export class BindingController {
       );
     }
   }
-  stop() {
+  stop(): void {
     this.stopped = true;
     this.controller.abort();
     if (this.timer) clearTimeout(this.timer);

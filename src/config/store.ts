@@ -13,17 +13,20 @@ import {
 } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { flockSync } from 'fs-ext';
-import { isAlias, isNode, parseDocument, type Document } from 'yaml';
-import type { AiConfig, Config } from './index.js';
-import type { Scope } from './scope.js';
+import { isAlias, isNode, parseDocument } from 'yaml';
+import type { Document } from 'yaml';
 import { ApiError } from '../obs/errors.js';
 import { canonicalJson } from './primitives.js';
 import { ConfigurationError } from './errors.js';
 import { parseConfig } from './index.js';
+import type { AiConfiguration, Config } from './index.js';
 import { scopeLocation } from './scope.js';
-export const revisionOf = (text: string) =>
+import type { Scope } from './scope.js';
+
+export const revisionOf = (text: string): string =>
   createHash('sha256').update(text).digest('hex');
-function withoutPath(config: Config, path: (string | number)[]) {
+
+function withoutPath(config: Config, path: Array<string | number>): string {
   const copy = structuredClone(config);
   let parent = copy as unknown as Record<string | number, unknown>;
   for (const key of path.slice(0, -1))
@@ -31,7 +34,7 @@ function withoutPath(config: Config, path: (string | number)[]) {
   delete parent[path.at(-1)!];
   return canonicalJson(copy);
 }
-function isolatedDocumentText(document: Document) {
+function isolatedDocumentText(document: Document): string {
   try {
     document.toJS({ maxAliasCount: 20 });
     return document.toString();
@@ -39,14 +42,15 @@ function isolatedDocumentText(document: Document) {
     throw new ApiError(400, 'configuration_alias_conflict');
   }
 }
+
 /** A pathname replacement is the commit point; readers see one complete document. */
 export function replacePrivateFile(
   path: string,
   text: string,
   beforeRename = () => {},
-) {
+): void {
   const temporary = `${path}.${randomUUID()}.tmp`;
-  let fd;
+  let fd: number | undefined;
   try {
     fd = openSync(
       temporary,
@@ -68,7 +72,7 @@ export function replacePrivateFile(
     }
   }
   // Rename has committed. A directory fsync is best effort on filesystems which do not support it.
-  let directory;
+  let directory: number | undefined;
   try {
     directory = openSync(dirname(path), constants.O_RDONLY);
     fsyncSync(directory);
@@ -78,14 +82,15 @@ export function replacePrivateFile(
     if (directory !== undefined) closeSync(directory);
   }
 }
+
 export class YamlConfiguration {
-  path;
-  cache?: { text: string; revision: string; config: Config };
+  readonly path: string;
+  private cache?: { text: string; revision: string; config: Config };
   constructor(path = './config.yaml') {
     this.path = resolve(path);
   }
-  text() {
-    let fd;
+  private text(): string {
+    let fd: number | undefined;
     try {
       fd = openSync(this.path, constants.O_RDONLY | constants.O_NOFOLLOW);
       const stat = fstatSync(fd);
@@ -98,7 +103,7 @@ export class YamlConfiguration {
       if (fd !== undefined) closeSync(fd);
     }
   }
-  read() {
+  read(): { revision: string; config: Config } {
     const text = this.text();
     if (this.cache?.text !== text) {
       this.cache = {
@@ -113,7 +118,10 @@ export class YamlConfiguration {
       config: structuredClone(this.cache.config),
     };
   }
-  updateAi(revision: string, update: (current: AiConfig) => unknown) {
+  updateAi(
+    revision: string,
+    update: (current: AiConfiguration) => AiConfiguration,
+  ): { revision: string; config: Config } {
     return this.updateValue(revision, (current) => ({
       path: ['ai'],
       value: update(current.ai),
@@ -122,19 +130,22 @@ export class YamlConfiguration {
   updateScope(
     revision: string,
     target: string,
-    update: (scope: Scope) => unknown,
-  ) {
+    update: (current: Scope) => Scope,
+  ): { revision: string; config: Config } {
     return this.updateValue(revision, (current) => {
       const location = scopeLocation(current, target);
       if (!location) throw new ApiError(404, 'scope_not_found');
       return { path: location.path, value: update(location.owner.scope) };
     });
   }
-  updateValue(
+  private updateValue(
     revision: string,
-    update: (config: Config) => { path: (string | number)[]; value: unknown },
-  ) {
-    let fd;
+    update: (current: Config) => {
+      path: Array<string | number>;
+      value: unknown;
+    },
+  ): { revision: string; config: Config } {
+    let fd: number | undefined;
     try {
       fd = openSync(
         `${this.path}.lock`,

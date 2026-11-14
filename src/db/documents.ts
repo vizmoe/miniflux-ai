@@ -1,10 +1,4 @@
 import { z } from 'zod';
-import type {
-  BackfillProgress,
-  CurrentDigestStats,
-  TaskPayloads,
-  ProviderStats,
-} from './types.js';
 import {
   nonempty,
   nonnegative,
@@ -17,6 +11,7 @@ import {
   canonicalJson,
 } from '../config/primitives.js';
 import { primarySubtag, scopeMatchSchema } from '../config/scope.js';
+
 const version = z.literal(1);
 const language = nonempty.refine((v) => {
   try {
@@ -34,8 +29,9 @@ const baseUrl = z.string().refine((v) => {
 });
 const orderedIds = z
   .array(safeId)
-  .refine((v) => v.every((id, i) => i === 0 || id > v[i - 1]));
+  .refine((v) => v.every((id, i) => i === 0 || id > v[i - 1]!));
 export const featureKind = z.enum(['translation', 'summary']);
+export type FeatureKind = z.infer<typeof featureKind>;
 export const requestedFeatures = z
   .array(featureKind)
   .nonempty()
@@ -43,7 +39,7 @@ export const requestedFeatures = z
     (v) =>
       JSON.stringify(v) ===
       JSON.stringify(
-        (['translation', 'summary'] as const).filter((k) => v.includes(k)),
+        ['translation', 'summary'].filter((k) => v.includes(k as FeatureKind)),
       ),
   );
 export const retryPolicySchema = z
@@ -56,12 +52,14 @@ export const retryPolicySchema = z
   })
   .strict()
   .refine((v) => v.max_delay_ms >= v.initial_delay_ms);
+export type RetryPolicy = z.infer<typeof retryPolicySchema>;
 export const aiExecutionSchema = z
   .object({
     schema_version: z.literal(2),
     ai_envelope_protocol_version: version,
   })
   .strict();
+export type AiExecution = z.infer<typeof aiExecutionSchema>;
 export const durableScopeSchema = z
   .object({
     fallback_action: z.enum(['allow', 'deny']),
@@ -114,13 +112,17 @@ export const summaryWorkSchema = z
     heading: nonempty,
   })
   .strict();
+export type TranslationWork = z.infer<typeof translationWorkSchema>;
+export type SummaryWork = z.infer<typeof summaryWorkSchema>;
 const matchingFeatures = (v: {
-  requested_features: ('translation' | 'summary')[];
+  requested_features: FeatureKind[];
   translation?: unknown;
   summary?: unknown;
 }) =>
-  (['translation', 'summary'] as const).every(
-    (kind) => (v[kind] !== undefined) === v.requested_features.includes(kind),
+  ['translation', 'summary'].every(
+    (kind) =>
+      (v[kind as FeatureKind] !== undefined) ===
+      v.requested_features.includes(kind as FeatureKind),
   );
 export const generatePayloadSchema = z
   .object({
@@ -133,6 +135,7 @@ export const generatePayloadSchema = z
   })
   .strict()
   .refine(matchingFeatures);
+export type GeneratePayload = z.infer<typeof generatePayloadSchema>;
 export const renderPayloadSchema = z
   .object({
     schema_version: version,
@@ -140,6 +143,7 @@ export const renderPayloadSchema = z
     retry_policy: retryPolicySchema,
   })
   .strict();
+export type RenderPayload = z.infer<typeof renderPayloadSchema>;
 export const digestSnapshotSchema = z
   .object({
     schema_version: version,
@@ -175,6 +179,7 @@ export const digestSnapshotSchema = z
     (v) =>
       v.output.partition_by === 'all' || v.output.existing_feed_id === null,
   );
+export type DigestSnapshot = z.infer<typeof digestSnapshotSchema>;
 export const digestPayloadSchema = z
   .object({
     schema_version: version,
@@ -182,6 +187,7 @@ export const digestPayloadSchema = z
     config_snapshot: digestSnapshotSchema,
   })
   .strict();
+export type DigestPayload = z.infer<typeof digestPayloadSchema>;
 export const backfillPayloadSchema = z
   .object({
     schema_version: version,
@@ -217,6 +223,7 @@ export const backfillPayloadSchema = z
     (v) =>
       v.since_ms === null || v.until_ms === null || v.since_ms < v.until_ms,
   );
+export type BackfillPayload = z.infer<typeof backfillPayloadSchema>;
 export const backfillProgressSchema = z
   .object({
     schema_version: version,
@@ -227,6 +234,7 @@ export const backfillProgressSchema = z
     marker_shaped_id_count: nonnegative,
   })
   .strict();
+export type BackfillProgress = z.infer<typeof backfillProgressSchema>;
 export const emptyBackfillProgress = (): BackfillProgress => ({
   schema_version: 1,
   after_entry_id: 0,
@@ -259,6 +267,7 @@ export const translationArtifactSchema = z
   })
   .strict()
   .refine((v) => new Set(v.blocks.map((b) => b.id)).size === v.blocks.length);
+export type TranslationPayload = z.infer<typeof translationArtifactSchema>;
 export const summaryArtifactSchema = z.discriminatedUnion('format', [
   z
     .object({
@@ -275,6 +284,7 @@ export const summaryArtifactSchema = z.discriminatedUnion('format', [
     })
     .strict(),
 ]);
+export type SummaryPayload = z.infer<typeof summaryArtifactSchema>;
 export const translationRenderSchema = z
   .object({ schema_version: version, title_template: translationTemplate })
   .strict();
@@ -310,10 +320,14 @@ export const digestOperations = [
   'generate_digest_overview',
   'merge_digest_overview_partials',
 ] as const;
+export type AiOperation =
+  | (typeof artifactOperations)[number]
+  | (typeof digestOperations)[number]
+  | 'detect_language';
 const sumsValid = (v: {
-  usage: { reported_request_count: number };
   request_count: number;
-  finish_reasons: Record<string, number>;
+  usage: z.infer<typeof usage>;
+  finish_reasons: z.infer<typeof finishReasons>;
 }) =>
   v.usage.reported_request_count <= v.request_count &&
   Object.values(v.finish_reasons).reduce((a, b) => a + b, 0) ===
@@ -388,17 +402,17 @@ const currentDigestStatsSchema = z
   .extend(breakdown)
   .strict();
 const providersValid = (v: {
-  providers: ProviderStats[];
+  providers: z.infer<typeof providerStatsSchema>[];
   request_count: number;
   total_duration_ms: number;
-  usage: ProviderStats['usage'];
+  usage: z.infer<typeof usage>;
 }) =>
   new Set(v.providers.map((p) => JSON.stringify([p.provider_id, p.model])))
     .size === v.providers.length &&
   v.providers.reduce((n, p) => n + p.request_count, 0) === v.request_count &&
   v.providers.reduce((n, p) => n + p.total_duration_ms, 0) ===
     v.total_duration_ms &&
-  (Object.keys(v.usage) as (keyof ProviderStats['usage'])[]).every(
+  (Object.keys(v.usage) as Array<keyof typeof v.usage>).every(
     (k) => v.providers.reduce((n, p) => n + p.usage[k], 0) === v.usage[k],
   );
 export const artifactStatsSchema = z.union([
@@ -421,6 +435,10 @@ export const digestStatsSchema = z.union([
       providersValid(v),
   ),
 ]);
+export type ArtifactStats = z.infer<typeof artifactStatsSchema>;
+export type CurrentDigestStats = z.infer<typeof currentDigestStatsSchema>;
+export type ProviderStats = z.infer<typeof providerStatsSchema>;
+export type DigestStats = z.infer<typeof digestStatsSchema>;
 export const failureClasses = [
   'network',
   'timeout',
@@ -475,9 +493,11 @@ export const lastErrorSchema = z
           (v.http_status === null && v.upstream_request_id === null))
       : v.miniflux_version === null && v.integrity_stage === null,
   );
+export type LastError = z.infer<typeof lastErrorSchema>;
 export const bindingSchema = z
   .object({ schema_version: version, base_url: baseUrl, user_id: safeId })
   .strict();
+export type Binding = z.infer<typeof bindingSchema>;
 export const cursorSchema = z
   .object({ schema_version: version, after_entry_id: nonnegative })
   .strict();
@@ -487,7 +507,11 @@ export const taskSchemas = {
   digest: digestPayloadSchema,
   ingest_backfill: backfillPayloadSchema,
 };
-export function retryPolicyOf(payload: TaskPayloads[keyof TaskPayloads]) {
+export type TaskType = keyof typeof taskSchemas;
+export type TaskPayload =
+  GeneratePayload | RenderPayload | DigestPayload | BackfillPayload;
+
+export function retryPolicyOf(payload: TaskPayload): RetryPolicy {
   return 'config_snapshot' in payload
     ? payload.config_snapshot.retry_policy
     : payload.retry_policy;

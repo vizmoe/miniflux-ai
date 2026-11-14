@@ -1,33 +1,3 @@
-import type { Database } from './database.js';
-import type {
-  Entry,
-  RetryPolicy,
-  CompactEntry,
-  FeatureKind,
-  FeatureState,
-  FeatureDecision,
-  Binding,
-  Task,
-  TaskRow,
-  TaskType,
-  TaskState,
-  TaskPayloads,
-  GeneratePayload,
-  BackfillProgress,
-  Artifact,
-  ArtifactRow,
-  ArtifactInput,
-  GenerationFailures,
-  LastError,
-  DigestStats,
-} from './types.js';
-export interface TaskFilter {
-  state?: TaskState;
-  type?: TaskType;
-  entry_id?: number;
-  before_id?: number;
-  limit?: number;
-}
 import { mergeDigestStats } from '../ai/stats.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -59,6 +29,23 @@ import {
   translationArtifactSchema,
   translationRenderSchema,
 } from './documents.js';
+import type {
+  ArtifactStats,
+  BackfillProgress,
+  Binding,
+  DigestStats,
+  FeatureKind,
+  GeneratePayload,
+  LastError,
+  RetryPolicy,
+  SummaryPayload,
+  TaskPayload,
+  TaskType,
+  TranslationPayload,
+} from './documents.js';
+import type { Entry, FeatureState, tasks, artifacts } from './schema.js';
+import type { Database } from './database.js';
+
 export const compactEntrySchema = z
   .object({
     entry_id: safeId,
@@ -83,11 +70,57 @@ export const compactEntrySchema = z
   .refine(
     (v) => (v.primary_language === null) === (v.language_confidence === null),
   );
+export type CompactEntry = z.infer<typeof compactEntrySchema>;
+type TaskRow = typeof tasks.$inferSelect;
+export type Task = Omit<
+  TaskRow,
+  'type' | 'payload' | 'progress' | 'last_error' | 'state'
+> & {
+  type: TaskType;
+  payload: TaskPayload;
+  progress: BackfillProgress | null;
+  last_error: LastError | null;
+  state: 'pending' | 'leased' | 'done' | 'dead';
+};
+type ArtifactRow = typeof artifacts.$inferSelect;
+type ArtifactBase = Omit<
+  ArtifactRow,
+  'kind' | 'payload' | 'render_spec' | 'ai_stats'
+> & { ai_stats: ArtifactStats };
+export type Artifact = ArtifactBase &
+  (
+    | {
+        kind: 'translation';
+        payload: TranslationPayload;
+        render_spec: z.infer<typeof translationRenderSchema>;
+      }
+    | {
+        kind: 'summary';
+        payload: SummaryPayload;
+        render_spec: z.infer<typeof summaryRenderSchema>;
+      }
+  );
+export type ArtifactInput = Artifact extends infer T
+  ? T extends Artifact
+    ? Omit<T, 'id' | 'entry_id' | 'marker_token' | 'created_at'>
+    : never
+  : never;
+export type Admission = {
+  kind: FeatureKind;
+  state: 'pending' | 'scheduled' | 'skipped';
+  skip_reason: string | null;
+};
+export type RequeueReason = {
+  code: string;
+  reason?: string;
+  feature?: FeatureKind;
+};
+
 export function backoff(
   policy: RetryPolicy,
   attempts: number,
   random = Math.random(),
-) {
+): number {
   return Math.min(
     policy.initial_delay_ms *
       policy.multiplier ** (attempts - 1) *
@@ -96,33 +129,31 @@ export function backoff(
   );
 }
 export class Repository {
-  db;
-  now;
   observe = {
-    entry: (_units: number) => {},
-    feature: (_kind: FeatureKind, _state: FeatureState['state']) => {},
-    task: (_type: TaskType, _state: TaskState, _duration: number) => {},
-    digest: (_job: string, _partition: string, _state: string) => {},
+    entry: (_units: number): void => {},
+    feature: (_kind: FeatureKind, _state: string): void => {},
+    task: (_type: TaskType, _state: string, _duration: number): void => {},
+    digest: (_job: string, _partition: string, _state: string): void => {},
   };
-  featureChanged(kind: FeatureKind, state: FeatureState['state']) {
-    this.db.afterCommit(() => this.observe.feature(kind, state));
+  private featureChanged(kind: string, state: string): void {
+    this.db.afterCommit(() => this.observe.feature(kind as FeatureKind, state));
   }
-  constructor(db: Database, now = Date.now) {
-    this.db = db;
-    this.now = now;
-  }
+  constructor(
+    readonly db: Database,
+    readonly now: () => number = Date.now,
+  ) {}
   entry(id: number): Entry | undefined {
     safeId.parse(id);
-    return this.db.get('SELECT * FROM entries WHERE entry_id = ?', id);
+    return this.db.get<Entry>('SELECT * FROM entries WHERE entry_id = ?', id);
   }
   entriesInWindow(start: number, end: number): Entry[] {
-    return this.db.all(
+    return this.db.all<Entry>(
       'SELECT * FROM entries WHERE published_at >= ? AND published_at < ? ORDER BY published_at DESC,entry_id DESC',
       start,
       end,
     );
   }
-  insertEntry(input: CompactEntry, fingerprint: string | null = null) {
+  insertEntry(input: CompactEntry, fingerprint: string | null = null): boolean {
     const data = compactEntrySchema.parse(input);
     const columns = Object.keys(data);
     const inserted =
@@ -143,13 +174,13 @@ export class Repository {
     return inserted;
   }
   recoveryCandidates(before: number, limit: number): Entry[] {
-    return this.db.all(
+    return this.db.all<Entry>(
       'SELECT * FROM entries WHERE recovery_checked_at<=? ORDER BY recovery_checked_at,entry_id LIMIT ?',
       before,
       limit,
     );
   }
-  checkedEntry(id: number, outcome: string) {
+  checkedEntry(id: number, outcome: string): void {
     this.db.run(
       'UPDATE entries SET recovery_checked_at=?,recovery_outcome=? WHERE entry_id=?',
       this.now(),
@@ -157,7 +188,7 @@ export class Repository {
       id,
     );
   }
-  activeRender(entryId: number) {
+  activeRender(entryId: number): boolean {
     return Boolean(
       this.db.get(
         "SELECT id FROM tasks WHERE entry_id=? AND type='render' AND state IN ('pending','leased') LIMIT 1",
@@ -165,14 +196,14 @@ export class Repository {
       ),
     );
   }
-  establishSourceFingerprint(id: number, fingerprint: string) {
+  establishSourceFingerprint(id: number, fingerprint: string): void {
     this.db.run(
       'UPDATE entries SET source_fingerprint=? WHERE entry_id=? AND source_fingerprint IS NULL',
       fingerprint,
       id,
     );
   }
-  acknowledgeSourceOnly(id: number, title: string) {
+  acknowledgeSourceOnly(id: number, title: string): void {
     this.db.run(
       'UPDATE entries SET rendered_generation=render_generation,rendered_title=? WHERE entry_id=?',
       title,
@@ -182,14 +213,14 @@ export class Repository {
   refreshSource(
     id: number,
     facts: Pick<
-      Entry,
+      CompactEntry,
       | 'source_title'
       | 'source_content_units'
       | 'primary_language'
       | 'language_confidence'
     >,
     fingerprint: string,
-  ) {
+  ): void {
     this.db.transaction(() => {
       // Revoking ownership fences in-flight model responses and obsolete render
       // tasks. Old Artifact tokens remain available for Source projection.
@@ -218,13 +249,13 @@ export class Repository {
       );
     });
   }
-  binding() {
+  binding(): Binding | undefined {
     const row = this.db.get<{ value: string }>(
       "SELECT value FROM service_state WHERE key = 'miniflux_account_binding'",
     );
     return row ? bindingSchema.parse(JSON.parse(row.value)) : undefined;
   }
-  bind(value: Binding, expected?: Binding) {
+  bind(value: Binding, expected?: Binding): void {
     const encoded = canonicalJson(bindingSchema.parse(value));
     this.db.transaction(() => {
       const current = this.binding();
@@ -237,7 +268,7 @@ export class Repository {
       );
     });
   }
-  cursor() {
+  cursor(): number | undefined {
     const row = this.db.get<{ value: string }>(
       "SELECT value FROM service_state WHERE key = 'new_entry_poll_cursor'",
     );
@@ -245,7 +276,7 @@ export class Repository {
       ? cursorSchema.parse(JSON.parse(row.value)).after_entry_id
       : undefined;
   }
-  setCursor(value: number) {
+  setCursor(value: number): void {
     const payload = cursorSchema.parse({
       schema_version: 1,
       after_entry_id: value,
@@ -257,7 +288,7 @@ export class Repository {
       this.now(),
     );
   }
-  outputFeedIds() {
+  outputFeedIds(): Set<number> {
     return new Set(
       this.db
         .all<{ feed_id: number }>(
@@ -267,22 +298,20 @@ export class Repository {
     );
   }
   featureStates(entryId: number): FeatureState[] {
-    return this.db.all(
+    return this.db.all<FeatureState>(
       'SELECT * FROM entry_feature_states WHERE entry_id = ? ORDER BY kind DESC',
       entryId,
     );
   }
-  activeGeneration(entryId: number) {
+  activeGeneration(entryId: number): Task | undefined {
     return this.decodeTask(
-      this.db.get(
+      this.db.get<TaskRow>(
         "SELECT * FROM tasks WHERE type = 'generate_artifacts' AND entry_id = ? AND state IN ('pending','leased')",
         entryId,
       ),
     );
   }
-  decodeTask(row: TaskRow): Task;
-  decodeTask(row: TaskRow | undefined): Task | undefined;
-  decodeTask(row: TaskRow | undefined): Task | undefined {
+  private decodeTask(row: TaskRow | undefined): Task | undefined {
     if (!row) return undefined;
     const type = row.type as TaskType;
     if (!(type in taskSchemas)) throw new Error('invalid_task_type');
@@ -299,14 +328,24 @@ export class Repository {
         row.last_error === null
           ? null
           : lastErrorSchema.parse(JSON.parse(row.last_error)),
-    } as Task;
+    };
   }
-  task(id: number) {
-    return this.decodeTask(this.db.get('SELECT * FROM tasks WHERE id = ?', id));
+  task(id: number): Task | undefined {
+    return this.decodeTask(
+      this.db.get<TaskRow>('SELECT * FROM tasks WHERE id = ?', id),
+    );
   }
-  listTasks(filter: TaskFilter = {}) {
-    const clauses = [];
-    const params = [];
+  listTasks(
+    filter: {
+      state?: string;
+      type?: string;
+      entry_id?: number;
+      limit?: number;
+      before_id?: number;
+    } = {},
+  ): Task[] {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
     for (const key of ['state', 'type', 'entry_id'] as const)
       if (filter[key] !== undefined) {
         clauses.push(`${key} = ?`);
@@ -323,17 +362,17 @@ export class Repository {
         ...params,
         filter.limit ?? 100,
       )
-      .map((r) => this.decodeTask(r));
+      .map((r) => this.decodeTask(r)!);
   }
-  createTask<K extends TaskType>(
-    type: K,
+  createTask(
+    type: TaskType,
     key: string,
     entryId: number | null,
-    payload: TaskPayloads[K],
+    payload: TaskPayload,
     progress: BackfillProgress | null = null,
     attempts = 0,
     runAfter = this.now(),
-  ) {
+  ): Task {
     const parsed = taskSchemas[type].parse(payload);
     const result = this.db.run(
       'INSERT INTO tasks(type,dedup_key,entry_id,payload,progress,state,priority,attempts,run_after,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
@@ -351,15 +390,15 @@ export class Repository {
       this.now(),
       this.now(),
     );
-    return this.task(Number(result.lastInsertRowid))! as Task<K>;
+    return this.task(Number(result.lastInsertRowid))!;
   }
   admit(
     entryId: number,
-    decisions: FeatureDecision[],
+    decisions: Admission[],
     payload: GeneratePayload | null,
     onlyMissing = false,
     retryPolicy?: RetryPolicy,
-  ) {
+  ): { admitted: boolean; task: Task | null } {
     return this.db.transaction(() => {
       const prior = this.featureStates(entryId);
       const allowed = decisions.filter(
@@ -371,7 +410,7 @@ export class Repository {
       if (allowed.length && this.activeGeneration(entryId))
         throw new ApiError(409, 'generation_in_progress');
       const removed = this.admitFeatures(entryId, allowed, prior);
-      let task: Task<'generate_artifacts'> | null = null;
+      let task: Task | null = null;
       if (due.length) {
         if (!payload) throw new Error('generation_snapshot_required');
         const narrowed = this.narrowPayload(payload, due);
@@ -397,11 +436,11 @@ export class Repository {
       return { admitted: allowed.length > 0, task };
     });
   }
-  admitFeatures(
+  private admitFeatures(
     entryId: number,
-    allowed: FeatureDecision[],
-    prior: FeatureState[],
-  ) {
+    allowed: Admission[],
+    prior: ReturnType<Repository['featureStates']>,
+  ): boolean {
     let removed = false;
     for (const d of allowed) {
       const old = prior.find((p) => p.kind === d.kind);
@@ -419,11 +458,14 @@ export class Repository {
     }
     return removed;
   }
-  narrowPayload(payload: GeneratePayload, kinds: FeatureKind[]) {
+  narrowPayload(
+    payload: GeneratePayload,
+    kinds: FeatureKind[],
+  ): GeneratePayload {
     return generatePayloadSchema.parse({
       schema_version: 1,
-      requested_features: (['translation', 'summary'] as const).filter((k) =>
-        kinds.includes(k),
+      requested_features: ['translation', 'summary'].filter((k) =>
+        kinds.includes(k as FeatureKind),
       ),
       ai: payload.ai,
       retry_policy: payload.retry_policy,
@@ -433,7 +475,7 @@ export class Repository {
       ...(kinds.includes('summary') ? { summary: payload.summary } : {}),
     });
   }
-  requestRender(entryId: number, retry: RetryPolicy) {
+  requestRender(entryId: number, retry: RetryPolicy): Task {
     return this.db.transaction(() => {
       const row = this.db.get<{ render_generation: number }>(
         'UPDATE entries SET render_generation=render_generation+1,updated_at=? WHERE entry_id=? RETURNING render_generation',
@@ -481,7 +523,7 @@ export class Repository {
             };
       });
   }
-  currentArtifacts(entryId: number) {
+  currentArtifacts(entryId: number): Artifact[] {
     const pointers = this.featureStates(entryId).filter(
       (s) => s.current_artifact_id !== null,
     );
@@ -494,7 +536,10 @@ export class Repository {
       return result;
     });
   }
-  readySummary(entryId: number, outputLanguage: string) {
+  readySummary(
+    entryId: number,
+    outputLanguage: string,
+  ): SummaryPayload | undefined {
     const state = this.featureStates(entryId).find((s) => s.kind === 'summary');
     if (state?.state !== 'ready') return undefined;
     const artifact = this.currentArtifacts(entryId).find(
@@ -502,7 +547,7 @@ export class Repository {
     );
     return artifact?.kind === 'summary' ? artifact.payload : undefined;
   }
-  assertOwner(task: Task) {
+  assertOwner(task: Task): void {
     if (
       !task.lease_owner ||
       !this.db.get(
@@ -513,16 +558,16 @@ export class Repository {
     )
       throw new LeaseLost();
   }
-  claim(concurrency: number, leaseMs: number) {
+  claim(concurrency: number, leaseMs: number): Task | undefined {
     return this.db.transaction(() => {
       const active = this.db.get<{ total: number; background: number }>(
         "SELECT count(*) AS total,coalesce(sum(priority=0),0) AS background FROM tasks WHERE state='leased'",
-      );
-      if (active!.total >= concurrency) return undefined;
+      )!;
+      if (active.total >= concurrency) return undefined;
       const row = this.db.get<TaskRow>(
         "SELECT * FROM tasks WHERE state='pending' AND run_after<=? AND (priority=100 OR (priority=0 AND ? < ?)) ORDER BY priority DESC,(type='render') DESC,created_at ASC,id ASC LIMIT 1",
         this.now(),
-        active!.background,
+        active.background,
         concurrency - FOREGROUND_RESERVED_SLOTS,
       );
       const task = this.decodeTask(row);
@@ -536,7 +581,7 @@ export class Repository {
       }
       if (task.type === 'generate_artifacts') {
         const p = generatePayloadSchema.parse(task.payload);
-        const states = this.featureStates(task.entry_id);
+        const states = this.featureStates(task.entry_id!);
         if (
           p.requested_features.some(
             (k) =>
@@ -556,14 +601,14 @@ export class Repository {
         }
       }
       const claimed = this.decodeTask(
-        this.db.get(
+        this.db.get<TaskRow>(
           "UPDATE tasks SET state='leased',attempts=attempts+1,lease_owner=?,lease_expires_at=?,updated_at=? WHERE id=? AND state='pending' RETURNING *",
           randomUUID(),
           this.now() + leaseMs,
           this.now(),
           task.id,
         ),
-      );
+      )!;
       if (task.type === 'generate_artifacts')
         for (const kind of generatePayloadSchema.parse(task.payload)
           .requested_features)
@@ -588,7 +633,7 @@ export class Repository {
       return claimed;
     });
   }
-  renew(task: Task, leaseMs: number) {
+  renew(task: Task, leaseMs: number): void {
     if (
       this.db.run(
         "UPDATE tasks SET lease_expires_at=? WHERE id=? AND state='leased' AND lease_owner=?",
@@ -599,7 +644,11 @@ export class Repository {
     )
       throw new LeaseLost();
   }
-  updateRelated(task: Task, terminal: boolean, tombstoned = false) {
+  private updateRelated(
+    task: Task,
+    terminal: boolean,
+    tombstoned = false,
+  ): void {
     if (task.type === 'generate_artifacts') {
       const state = terminal ? 'failed' : 'pending';
       this.updateGenerationRelated(task, state);
@@ -612,9 +661,9 @@ export class Repository {
       const run = this.db.get<{ job_id: string; partition_key: string }>(
         'SELECT w.job_id,r.partition_key FROM digest_runs r JOIN digest_windows w ON w.id=r.digest_window_id WHERE r.id=?',
         digestPayloadSchema.parse(task.payload).digest_run_id,
-      );
+      )!;
       this.db.afterCommit(() =>
-        this.observe.digest(run!.job_id, run!.partition_key, state),
+        this.observe.digest(run.job_id, run.partition_key, state),
       );
     }
     this.db.run(
@@ -624,11 +673,11 @@ export class Repository {
       digestPayloadSchema.parse(task.payload).digest_run_id,
     );
   }
-  updateGenerationRelated(
-    task: Task<'generate_artifacts'>,
-    next: FeatureState['state'],
-  ) {
-    for (const state of this.featureStates(task.entry_id).filter(
+  private updateGenerationRelated(
+    task: Task,
+    next: 'failed' | 'pending',
+  ): void {
+    for (const state of this.featureStates(task.entry_id!).filter(
       (s) =>
         s.last_generation_task_id === task.id &&
         ['processing', 'pending'].includes(s.state),
@@ -641,7 +690,7 @@ export class Repository {
       task.id,
     );
   }
-  deadPending(task: Task, error: LastError) {
+  private deadPending(task: Task, error: LastError): void {
     this.db.run(
       "UPDATE tasks SET state='dead',last_error=?,updated_at=? WHERE id=? AND state='pending'",
       canonicalJson(lastErrorSchema.parse(error)),
@@ -651,7 +700,11 @@ export class Repository {
     this.updateRelated(task, true);
     this.db.afterCommit(() => this.observe.task(task.type, 'dead', 0));
   }
-  settle(task: Task, outcome: 'done' | WorkError, digestDelta?: DigestStats) {
+  settle(
+    task: Task,
+    outcome: 'done' | WorkError,
+    digestDelta?: DigestStats,
+  ): void {
     this.db.transaction(() => {
       this.assertOwner(task);
       if (digestDelta)
@@ -663,7 +716,7 @@ export class Repository {
         outcome === 'done' ||
         !outcome.detail.retryable ||
         task.attempts >= retryPolicyOf(task.payload).max_attempts;
-      let state: TaskState = terminal ? 'dead' : 'pending';
+      let state = terminal ? 'dead' : 'pending';
       if (outcome === 'done') state = 'done';
       const after =
         outcome === 'done'
@@ -697,7 +750,7 @@ export class Repository {
       );
     });
   }
-  reap() {
+  reap(): number {
     return this.db.transaction(() => {
       const expired = this.db.all<TaskRow>(
         "SELECT * FROM tasks WHERE state='leased' AND lease_expires_at<=?",
@@ -705,13 +758,13 @@ export class Repository {
       );
       for (const row of expired)
         this.settle(
-          this.decodeTask(row),
+          this.decodeTask(row)!,
           new WorkError('lease_expired', 'timeout', true),
         );
       return expired.length;
     });
   }
-  storeArtifact(task: Task<'generate_artifacts'>, input: ArtifactInput) {
+  private storeArtifact(task: Task, input: ArtifactInput): void {
     const kind = input.kind;
     this.featureChanged(kind, 'ready');
     const body =
@@ -741,16 +794,16 @@ export class Repository {
       kind,
     );
   }
-  saveGenerationMembers(
-    task: Task<'generate_artifacts'>,
+  private saveGenerationMembers(
+    task: Task,
     payload: GeneratePayload,
     inputs: ArtifactInput[],
-    failures: GenerationFailures,
-  ) {
+    failures: Partial<Record<FeatureKind, WorkError>>,
+  ): { retryKinds: FeatureKind[]; terminalKinds: FeatureKind[] } {
     const retryKinds: FeatureKind[] = [];
     const terminalKinds: FeatureKind[] = [];
     for (const kind of payload.requested_features) {
-      const state = this.featureStates(task.entry_id).find(
+      const state = this.featureStates(task.entry_id!).find(
         (s) => s.kind === kind,
       );
       if (
@@ -786,10 +839,10 @@ export class Repository {
     return { retryKinds, terminalKinds };
   }
   completeGeneration(
-    task: Task<'generate_artifacts'>,
+    task: Task,
     inputs: ArtifactInput[],
-    failures: GenerationFailures,
-  ) {
+    failures: Partial<Record<FeatureKind, WorkError>>,
+  ): void {
     this.db.transaction(() => {
       this.assertOwner(task);
       const payload = generatePayloadSchema.parse(task.payload);
@@ -808,7 +861,7 @@ export class Repository {
           ),
         ).size === 1
       ) {
-        const first = failures[payload.requested_features[0]]!;
+        const first = failures[payload.requested_features[0]!]!;
         this.settle(
           task,
           new WorkError(
@@ -833,7 +886,7 @@ export class Repository {
       );
       this.settle(task, 'done');
       if (inputs.length)
-        this.requestRender(task.entry_id, payload.retry_policy);
+        this.requestRender(task.entry_id!, payload.retry_policy);
       // Every failed member retains its own resumable lineage, even when the
       // joint task is done because its sibling installed an Artifact.
       for (const kind of terminalKinds) {
@@ -887,7 +940,7 @@ export class Repository {
         );
     });
   }
-  completeRender(task: Task<'render'>, generation: number, title?: string) {
+  completeRender(task: Task, generation: number, title?: string): void {
     this.db.transaction(() => {
       this.assertOwner(task);
       if (
@@ -912,10 +965,10 @@ export class Repository {
     });
   }
   updateBackfill(
-    task: Task<'ingest_backfill'>,
+    task: Task,
     progress: BackfillProgress,
     admissions: () => void,
-  ) {
+  ): void {
     this.db.transaction(() => {
       this.assertOwner(task);
       admissions();
@@ -928,7 +981,7 @@ export class Repository {
       );
     });
   }
-  addDigestStats(runId: number, delta: DigestStats) {
+  addDigestStats(runId: number, delta: DigestStats): void {
     digestStatsSchema.parse(delta);
     const row = this.db.get<{ ai_stats: string }>(
       'SELECT ai_stats FROM digest_runs WHERE id=?',
@@ -945,12 +998,12 @@ export class Repository {
       runId,
     );
   }
-  requeueReason(task: Task) {
+  requeueReason(task: Task): RequeueReason | null {
     if (task.state !== 'dead') return { code: 'task_not_dead' };
     if (task.type === 'generate_artifacts') {
-      if (this.activeGeneration(task.entry_id))
+      if (this.activeGeneration(task.entry_id!))
         return { code: 'generation_in_progress' };
-      const states = this.featureStates(task.entry_id);
+      const states = this.featureStates(task.entry_id!);
       for (const kind of generatePayloadSchema.parse(task.payload)
         .requested_features)
         if (
@@ -984,7 +1037,7 @@ export class Repository {
     }
     return null;
   }
-  partitionBusy(job: string, partition: string) {
+  partitionBusy(job: string, partition: string): boolean {
     return Boolean(
       this.db.get(
         "SELECT t.id FROM tasks t JOIN digest_runs r ON r.id=json_extract(t.payload,'$.digest_run_id') JOIN digest_windows w ON w.id=r.digest_window_id WHERE t.type='digest' AND t.state IN ('pending','leased') AND w.job_id=? AND r.partition_key=? LIMIT 1",
@@ -993,7 +1046,7 @@ export class Repository {
       ),
     );
   }
-  requeue(id: number) {
+  requeue(id: number): Task {
     return this.db.transaction(() => {
       const task = this.task(id);
       if (!task) throw new ApiError(404, 'task_not_found');
@@ -1010,7 +1063,7 @@ export class Repository {
       );
       this.updateRelated(task, false);
       if (task.type === 'generate_artifacts')
-        for (const state of this.featureStates(task.entry_id).filter(
+        for (const state of this.featureStates(task.entry_id!).filter(
           (s) => s.last_generation_task_id === id && s.state === 'failed',
         ))
           this.featureChanged(state.kind, 'pending');

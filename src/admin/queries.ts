@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Database } from '../db/database.js';
-import type { Entry, FeatureKind } from '../db/types.js';
+import type { Entry } from '../db/schema.js';
+
 export interface EntryListItem extends Pick<
   Entry,
   | 'entry_id'
@@ -17,6 +18,7 @@ export interface EntryListItem extends Pick<
   summary_skip_reason: string | null;
   render_status: string;
 }
+
 const states = [
   'scheduled',
   'pending',
@@ -24,13 +26,17 @@ const states = [
   'ready',
   'skipped',
   'failed',
-];
+] as const;
 export function dashboard(db: Database, now = Date.now()) {
   const features = {
     translation: Object.fromEntries(states.map((s) => [s, 0])),
     summary: Object.fromEntries(states.map((s) => [s, 0])),
   };
-  for (const row of db.all<{ kind: FeatureKind; state: string; count: number }>(
+  for (const row of db.all<{
+    kind: 'translation' | 'summary';
+    state: string;
+    count: number;
+  }>(
     'SELECT kind,state,count(*) AS count FROM entry_feature_states GROUP BY kind,state',
   ))
     features[row.kind][row.state] = row.count;
@@ -43,7 +49,7 @@ export function dashboard(db: Database, now = Date.now()) {
     tasks[row.state] = row.count;
   const day = 86400000,
     today = Math.floor(now / day) * day;
-  const history = db.all<{ date: string; kind: FeatureKind; count: number }>(
+  const history = db.all<{ date: string; kind: string; count: number }>(
     "SELECT strftime('%Y-%m-%d',created_at/1000,'unixepoch') AS date,kind,count(*) AS count FROM artifacts WHERE created_at>=? AND created_at<? GROUP BY date,kind",
     today - 13 * day,
     today + day,
@@ -101,8 +107,8 @@ export function listEntries(db: Database, input: unknown) {
     })
     .strict()
     .parse(input);
-  const clauses = [],
-    values = [];
+  const clauses: string[] = [],
+    values: unknown[] = [];
   if (query.q) {
     clauses.push(
       '(instr(lower(e.source_title),lower(?))>0 OR CAST(e.entry_id AS TEXT)=?)',

@@ -1,14 +1,15 @@
 import { readFile } from 'node:fs/promises';
 import type { FastifyInstance } from 'fastify';
+
 /** Fixed routes only: no user-controlled filesystem path or SPA catch-all. */
-export function registerConsole(app: FastifyInstance) {
+export function registerConsole(app: FastifyInstance): void {
   app.get('/console', async (_request, reply) => reply.redirect('/console/'));
   for (const [route, file, type] of [
     ['/console/', 'index.html', 'text/html; charset=utf-8'],
     ['/console/app.js', 'app.js', 'text/javascript; charset=utf-8'],
     ['/console/app.css', 'app.css', 'text/css; charset=utf-8'],
   ])
-    app.get(route, async (_request, reply) => {
+    app.get(route!, async (_request, reply) => {
       reply
         .header('Cache-Control', 'no-cache')
         .header('X-Content-Type-Options', 'nosniff')
@@ -21,7 +22,7 @@ export function registerConsole(app: FastifyInstance) {
         const bytes = await readFile(
           new URL(`../../dist/admin/${file}`, import.meta.url),
         );
-        return reply.type(type).send(bytes);
+        return reply.type(type!).send(bytes);
       } catch (error) {
         if (
           !(error instanceof Error) ||

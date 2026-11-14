@@ -3,7 +3,7 @@ import type { ScopeSettings } from '../src/admin/scopes.js';
 import type { dashboard, EntryListItem } from '../src/admin/queries.js';
 import type { Repository } from '../src/db/repository.js';
 import type { Entry, FeatureState } from '../src/db/types.js';
-import type { Source } from '../src/source/index.js';
+import type { SourceProjection as Source } from '../src/source/index.js';
 
 export type ModelView = ReturnType<ModelSettings['view']>;
 export type ProviderView = ModelView['providers'][number];

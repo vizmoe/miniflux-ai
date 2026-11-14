@@ -2,7 +2,7 @@
 
 A companion service for one Miniflux account. It translates articles, generates summaries, and imports scheduled digests back into Miniflux while preserving the original article content. A browser console manages AI providers, processing rules, entries and tasks.
 
-This repository was reconstructed from a container image. See [RECOVERY.md](RECOVERY.md) for provenance and the limits of the recovery.
+This repository was recovered from a container image and a matching SonarQube source snapshot. See [RECOVERY.md](RECOVERY.md) for provenance and the limits of the recovery.
 
 ## Run with Docker Compose
 

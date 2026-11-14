@@ -1,40 +1,39 @@
 import { setTimeout as delay } from 'node:timers/promises';
+
 export interface WorkOrder {
   priority: number;
   created_at: number;
   id: number;
 }
-type Release = () => void;
-interface Waiter {
-  order: WorkOrder;
-  sequence: number;
-  resolve: (release: Release) => void;
-  reject: (reason: unknown) => void;
-  signal?: AbortSignal;
-  abort: () => void;
-}
-const defaultOrder = Object.freeze({
+const defaultOrder: WorkOrder = Object.freeze({
   priority: 0,
   created_at: 0,
   id: 0,
 });
+
+interface Waiter {
+  order: WorkOrder;
+  sequence: number;
+  resolve: (release: () => void) => void;
+  reject: (error: unknown) => void;
+  signal?: AbortSignal;
+  abort: () => void;
+}
 export class PrioritySemaphore {
-  capacity;
-  active = 0;
-  sequence = 0;
-  waiting: Waiter[] = [];
-  constructor(capacity: number) {
-    this.capacity = capacity;
+  private active = 0;
+  private sequence = 0;
+  private readonly waiting: Waiter[] = [];
+  constructor(readonly capacity: number) {
     if (!Number.isInteger(capacity) || capacity < 1)
       throw new Error('invalid_capacity');
   }
   acquire(
     order: WorkOrder = defaultOrder,
     signal?: AbortSignal,
-  ): Promise<Release> {
+  ): Promise<() => void> {
     signal?.throwIfAborted();
-    return new Promise<Release>((resolve, reject) => {
-      const waiter = {
+    return new Promise((resolve, reject) => {
+      const waiter: Waiter = {
         order,
         sequence: this.sequence++,
         resolve,
@@ -58,7 +57,7 @@ export class PrioritySemaphore {
       this.drain();
     });
   }
-  drain() {
+  private drain(): void {
     while (this.active < this.capacity && this.waiting.length) {
       const next = this.waiting.shift()!;
       next.signal?.removeEventListener('abort', next.abort);
@@ -73,7 +72,7 @@ export class PrioritySemaphore {
     }
   }
   async use<T>(
-    operation: () => T | Promise<T>,
+    operation: () => Promise<T> | T,
     order?: WorkOrder,
     signal?: AbortSignal,
   ): Promise<T> {
@@ -87,10 +86,13 @@ export class PrioritySemaphore {
   }
 }
 export class EntryLock {
-  locks = new Map<number, { semaphore: PrioritySemaphore; users: number }>();
+  private readonly locks = new Map<
+    number,
+    { semaphore: PrioritySemaphore; users: number }
+  >();
   async with<T>(
     entryId: number,
-    operation: () => T | Promise<T>,
+    operation: () => Promise<T> | T,
     signal?: AbortSignal,
   ): Promise<T> {
     const slot = this.locks.get(entryId) ?? {
@@ -112,18 +114,16 @@ export class EntryLock {
 }
 /** Start-rate limiter: waiting for a permit never occupies an HTTP socket. */
 export class RequestLimiter {
-  perSecond;
-  nextStart = 0;
-  startLock = new PrioritySemaphore(1);
-  concurrent;
-  constructor(concurrency: number, perSecond: number) {
-    this.perSecond = perSecond;
+  private nextStart = 0;
+  private readonly startLock = new PrioritySemaphore(1);
+  private readonly concurrent: PrioritySemaphore;
+  constructor(
+    concurrency: number,
+    private readonly perSecond: number,
+  ) {
     this.concurrent = new PrioritySemaphore(concurrency);
   }
-  async run<T>(
-    operation: () => T | Promise<T>,
-    signal?: AbortSignal,
-  ): Promise<T> {
+  async run<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     return this.concurrent.use(
       async () => {
         const release = await this.startLock.acquire(undefined, signal);

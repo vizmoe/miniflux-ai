@@ -1,4 +1,5 @@
 import { WorkError } from '../obs/errors.js';
+
 const invalid = () =>
   new WorkError('ai_invalid_response', 'invalid_response', true);
 function record(value: unknown): Record<string, unknown> {
@@ -6,8 +7,9 @@ function record(value: unknown): Record<string, unknown> {
     throw invalid();
   return value as Record<string, unknown>;
 }
-function streamChunk(value: string) {
-  let parsed;
+
+function streamChunk(value: string): { choices: unknown[]; usage?: unknown } {
+  let parsed: unknown;
   try {
     parsed = JSON.parse(value);
   } catch {
@@ -20,14 +22,18 @@ function streamChunk(value: string) {
     chunk.choices.length > 1
   )
     throw invalid();
-  return chunk as Record<string, unknown> & { choices: unknown[] };
+  return chunk as { choices: unknown[]; usage?: unknown };
 }
+
 /** Reassemble one completion; no partial result crosses the transport boundary. */
-async function streamedCompletion(response: Response, signal: AbortSignal) {
+async function streamedCompletion(
+  response: Response,
+  signal: AbortSignal,
+): Promise<unknown> {
   if (!response.body) throw invalid();
   const reader = response.body.getReader();
   const decoder = new TextDecoder('utf-8', { fatal: true });
-  const decode = (bytes?: Uint8Array<ArrayBuffer>, stream = false) => {
+  const decode = (bytes?: Uint8Array, stream = false) => {
     try {
       return decoder.decode(bytes, { stream });
     } catch {
@@ -122,6 +128,7 @@ async function streamedCompletion(response: Response, signal: AbortSignal) {
     reader.releaseLock();
   }
 }
+
 export async function readCompletion(
   response: Response,
   signal: AbortSignal,

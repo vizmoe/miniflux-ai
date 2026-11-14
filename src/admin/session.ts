@@ -1,22 +1,23 @@
-import type { FastifyInstance, FastifyRequest } from 'fastify';
-import type { Service } from '../runtime/service.js';
 import {
   createHash,
   createHmac,
   randomBytes,
   timingSafeEqual,
 } from 'node:crypto';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import type { Service } from '../runtime/service.js';
 import { ApiError } from '../obs/errors.js';
+
 const lifetime = 12 * 60 * 60 * 1000;
 const cookieName = 'mfai_admin';
 export class AdminSessions {
-  service;
-  failures = new Map<string, { count: number; until: number }>();
-  constructor(service: Service) {
-    this.service = service;
-  }
-  token(request: FastifyRequest) {
+  private readonly failures = new Map<
+    string,
+    { count: number; until: number }
+  >();
+  constructor(private readonly service: Service) {}
+  private token(request: FastifyRequest): string {
     return (
       (request.headers.cookie ?? '')
         .split(';')
@@ -25,18 +26,18 @@ export class AdminSessions {
         ?.slice(cookieName.length + 1) ?? ''
     );
   }
-  hash(token: string) {
+  private hash(token: string): string {
     return createHmac('sha256', this.service.config.server.admin_token!)
       .update(token)
       .digest('hex');
   }
-  origin(request: FastifyRequest) {
+  private origin(request: FastifyRequest): string {
     return new URL(
       this.service.config.server.admin_origin ??
         `${request.protocol}://${request.headers.host}`,
     ).origin;
   }
-  sameOrigin(request: FastifyRequest) {
+  sameOrigin(request: FastifyRequest): void {
     let valid = false;
     try {
       valid =
@@ -47,17 +48,17 @@ export class AdminSessions {
     if (!valid || request.headers['sec-fetch-site'] === 'cross-site')
       throw new ApiError(403, 'origin_rejected');
   }
-  cookie(request: FastifyRequest, token: string, age: number) {
+  private cookie(request: FastifyRequest, token: string, age: number): string {
     return `${cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${age}${this.origin(request).startsWith('https:') ? '; Secure' : ''}`;
   }
-  validSecret(value: string) {
+  private validSecret(value: string): boolean {
     const digest = (s: string) => createHash('sha256').update(s).digest();
     return timingSafeEqual(
       digest(value),
       digest(this.service.config.server.admin_token!),
     );
   }
-  authorize(request: FastifyRequest) {
+  authorize(request: FastifyRequest): void {
     const bearer = request.headers.authorization;
     if (bearer) {
       if (!bearer.startsWith('Bearer ') || !this.validSecret(bearer.slice(7)))
@@ -77,7 +78,7 @@ export class AdminSessions {
     if (request.headers['sec-fetch-site'] === 'cross-site')
       throw new ApiError(403, 'origin_rejected');
   }
-  register(app: FastifyInstance) {
+  register(app: FastifyInstance): void {
     app.post('/auth/session', { bodyLimit: 8192 }, async (request, reply) => {
       this.sameOrigin(request);
       const now = Date.now();
@@ -88,7 +89,7 @@ export class AdminSessions {
         reply.header('Retry-After', '900');
         throw new ApiError(429, 'login_rate_limited');
       }
-      let body;
+      let body: unknown;
       try {
         body = JSON.parse((request.body as Buffer).toString('utf8'));
       } catch {

@@ -60,7 +60,7 @@ async function ingestExample(entry = exampleEntry()) {
   });
   expect(accepted.status).toBe(204);
   await expect.poll(() => harness.writes.length, { timeout: 15_000 }).toBe(1);
-  await expect.poll(() => harness.service.queue.active.size).toBe(0);
+  await harness.service.queue.idle();
   return { original, body, headers };
 }
 
@@ -149,7 +149,13 @@ it('pauses queued work and webhooks after an incompatible version probe, then re
   });
   const callsBefore = harness.aiOperations.length;
   harness.upstreamState.minifluxVersion = '99.0.0';
-  binding.now = () => Date.now() + MINIFLUX_VERSION_PROBE_TTL + 1;
+  expect(
+    Reflect.set(
+      binding,
+      'now',
+      () => Date.now() + MINIFLUX_VERSION_PROBE_TTL + 1,
+    ),
+  ).toBe(true);
   expect((await fetch(harness.url + '/readyz')).status).toBe(503);
   queue.start();
   expect(repository.task(taskId)).toMatchObject({

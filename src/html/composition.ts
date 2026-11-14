@@ -1,6 +1,5 @@
-import type { Artifact, SummaryArtifact } from '../db/types.js';
-import type { Source } from '../source/index.js';
 import { isDeepStrictEqual } from 'node:util';
+import type { Artifact } from '../db/repository.js';
 import { expandTemplate } from '../config/primitives.js';
 import { parseSource } from './dom.js';
 import { extractSemanticBlocks, extractTranslationBlocks } from './blocks.js';
@@ -9,12 +8,16 @@ import {
   summaryMarker,
   translationMarker,
 } from './ownership.js';
+
 export class BlockPlanMismatch extends Error {
   constructor() {
     super('block_plan_mismatch');
   }
 }
-function insertSummary(root: Element, summary: SummaryArtifact) {
+function insertSummary(
+  root: HTMLElement,
+  summary: Extract<Artifact, { kind: 'summary' }>,
+): string {
   const document = root.ownerDocument;
   const wrapper = document.createElement('blockquote'),
     marker = document.createElement('sup');
@@ -42,14 +45,22 @@ function insertSummary(root: Element, summary: SummaryArtifact) {
   root.insertBefore(wrapper, root.firstChild);
   return id;
 }
-export function compose(source: Source, artifacts: Artifact[]) {
+export function compose(
+  source: { title: string; content: string },
+  artifacts: Artifact[],
+): {
+  title: string;
+  content: string;
+  markers: string[];
+  sourceSignature: unknown;
+} {
   const root = parseSource(source.content);
   const translation = artifacts.find((a) => a.kind === 'translation');
   const plan =
     translation?.payload.schema_version === 2
       ? extractTranslationBlocks(root)
       : extractSemanticBlocks(root);
-  const markers = [];
+  const markers: string[] = [];
   const sourceSignature = computeSourceIntegritySignature(root);
   let title = source.title;
   if (translation?.kind === 'translation') {

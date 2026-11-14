@@ -1,14 +1,11 @@
-import type {
-  DigestFeed,
-  DigestRun,
-  DigestWindow,
-  Entry,
-} from '../../db/types.js';
-import type { DigestItem, DigestOverview } from './generation.js';
+import type { Overview, PreparedItem } from '../../ai/protocol.js';
 import { escapeHtml } from '../../html/dom.js';
 import { expandTemplate } from '../../config/primitives.js';
 import { permalinkPath, templateValues } from '../../db/digest.js';
-export function provisioningAtom(feed: DigestFeed) {
+import type { DigestRun, DigestWindow } from '../../db/digest.js';
+import type { Entry, FeedRecord } from '../../db/schema.js';
+
+export function provisioningAtom(feed: FeedRecord): string {
   const url = escapeHtml(feed.feed_url),
     title = escapeHtml(feed.feed_title);
   return `<?xml version="1.0" encoding="utf-8"?>\n<feed xmlns="http://www.w3.org/2005/Atom"><id>${url}</id><title>${title}</title><updated>${new Date(feed.created_at).toISOString()}</updated><link rel="self" href="${url}"/><author><name>miniflux-ai</name></author></feed>`;
@@ -17,8 +14,8 @@ export function renderDigest(
   run: DigestRun,
   window: DigestWindow,
   entries: Entry[],
-  items: DigestItem[],
-  overview: DigestOverview,
+  items: PreparedItem[],
+  overview: Overview,
 ) {
   const snapshot = window.config_snapshot;
   const title = expandTemplate(

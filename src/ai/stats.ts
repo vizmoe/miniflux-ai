@@ -7,8 +7,8 @@ import type {
   CurrentDigestStats,
   DigestStats,
   ProviderStats,
-} from '../db/types.js';
-import type { CallStat } from '../generation/types.js';
+} from '../db/documents.js';
+import type { CallStat } from './client.js';
 
 type Totals = Pick<
   CurrentDigestStats,

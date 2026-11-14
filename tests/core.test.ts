@@ -54,7 +54,17 @@ describe('concurrency contracts', () => {
     release();
     await Promise.all([background, foreground]);
     expect(order).toEqual(['foreground', 'background']);
-    expect(semaphore.active).toBe(0);
+    let active = 0;
+    await Promise.all(
+      [1, 2].map(() =>
+        semaphore.use(async () => {
+          active++;
+          await Promise.resolve();
+          expect(active).toBe(1);
+          active--;
+        }),
+      ),
+    );
   });
 
   it('cancels queued work without leaking a permit and serializes the same entry', async () => {

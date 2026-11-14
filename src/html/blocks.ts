@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { isElement } from './dom.js';
 import { inlineFormatter, isInlineFormatting } from './inline.js';
 import { countContentUnits, hasContentUnits, normalizeText } from './units.js';
+
 const carriers = new Set(
   'p h1 h2 h3 h4 h5 h6 li dt dd figcaption caption th td'.split(' '),
 );
@@ -12,34 +13,38 @@ const excluded = new Set(
     ' ',
   ),
 );
+interface Anchor {
+  owner: Element;
+  after: Node;
+  full: boolean;
+  text: string;
+  plainText: string;
+}
 export interface SemanticBlock {
   id: string;
   text: string;
 }
-export type BlockPlan = ReturnType<typeof extractSemanticBlocks>;
-export function extractSemanticBlocks(root: Element) {
+export interface SemanticPlan {
+  blocks: SemanticBlock[];
+  sourceContentUnits: number;
+  insert(id: string, marker: string, text: string): void;
+  sections(): SemanticBlock[][];
+}
+export type BlockPlan = SemanticPlan;
+export function extractSemanticBlocks(root: Element): SemanticPlan {
   return blockPlan(root, false);
 }
-export function extractTranslationBlocks(root: Element) {
+export function extractTranslationBlocks(root: Element): SemanticPlan {
   return blockPlan(root, true);
 }
-function blockPlan(root: Element, formatted: boolean) {
+function blockPlan(root: Element, formatted: boolean): SemanticPlan {
   const formatter = formatted ? inlineFormatter(root) : null;
   const blocks: SemanticBlock[] = [];
-  let sourceContentUnits;
-  const anchors = new Map<
-    string,
-    {
-      owner: Element;
-      after: ChildNode;
-      full: boolean;
-      text: string;
-      plainText: string;
-    }
-  >();
+  let sourceContentUnits: number | undefined;
+  const anchors = new Map<string, Anchor>();
   const paths = new WeakMap<Element, string>();
   paths.set(root, 'root');
-  const assign = (el: Element): void =>
+  const assign = (el: Element) =>
     Array.from(el.children).forEach((child, index) => {
       paths.set(
         child,
@@ -59,7 +64,7 @@ function blockPlan(root: Element, formatted: boolean) {
   const processOwner = (owner: Element, isRoot = false): void => {
     let texts: string[] = [];
     let formattedTexts: string[] = [];
-    let after: ChildNode | undefined;
+    let after: Node | undefined;
     let ordinal = 0;
     const full =
       !isRoot && carriers.has(owner.localName) && !containsBoundary(owner);
@@ -81,7 +86,7 @@ function blockPlan(root: Element, formatted: boolean) {
       formattedTexts = [];
       after = undefined;
     };
-    const walk = (node: Node, branch: ChildNode): void => {
+    const walk = (node: Node, branch: Node): void => {
       if (node.nodeType === 3) {
         texts.push(node.textContent ?? '');
         formattedTexts.push(node.textContent ?? '');
@@ -151,7 +156,7 @@ function blockPlan(root: Element, formatted: boolean) {
       }
       return result;
     },
-    insert(id: string, marker: string, text: string) {
+    insert(id, marker, text) {
       const anchor = anchors.get(id);
       if (!anchor) throw new Error('unknown_block');
       const { owner, after, full } = anchor;
@@ -173,6 +178,6 @@ function blockPlan(root: Element, formatted: boolean) {
     },
   };
 }
-export function computeSourceContentUnits(root: Element) {
+export function computeSourceContentUnits(root: HTMLElement): number {
   return extractSemanticBlocks(root).sourceContentUnits;
 }

@@ -1,25 +1,32 @@
-import type { AiConfig, Provider } from '../config/index.js';
-import type { AiExecution } from '../db/types.js';
-import type { WorkOrder } from '../runtime/concurrency.js';
-import type { CallStat } from '../generation/types.js';
-import type { Envelope, Operation } from './protocol.js';
-export type AiObserver = (
-  model: string,
-  operation: Operation,
-  mode: 'joint' | 'single',
-  outcome: CallStat['outcome'],
-  bytes: number,
-) => void;
+import type { AiConfiguration, AiProvider } from '../config/index.js';
 import { ProviderPool } from './providers.js';
+import type { AiExecution, AiOperation } from '../db/documents.js';
+import type { WorkOrder } from '../runtime/concurrency.js';
 import { PrioritySemaphore } from '../runtime/concurrency.js';
 import { WorkError, upstreamRequestId } from '../obs/errors.js';
 import { retryAfter } from '../miniflux/client.js';
+import type { Fetch } from '../miniflux/client.js';
 import {
   parseEnvelope,
   parseTopLevel,
   protocolInstruction,
 } from './protocol.js';
+import type { Envelope } from './protocol.js';
 import { readCompletion } from './response.js';
+
+export interface CallStat {
+  provider_id: string;
+  model: string;
+  operation: AiOperation;
+  duration_ms: number;
+  finish_reason: 'stop' | 'length' | 'content_filter' | 'other' | 'missing';
+  usage: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  } | null;
+  outcome: 'succeeded' | 'failed';
+}
 const overflowCodes = new Set([
   'context_length_exceeded',
   'context_window_exceeded',
@@ -28,7 +35,11 @@ const overflowCodes = new Set([
   'prompt_too_long',
   'input_too_long',
 ]);
-export function classifyAiFailure(status: number, body: unknown, after = 0) {
+export function classifyAiFailure(
+  status: number,
+  body: unknown,
+  after = 0,
+): WorkError {
   const codes: string[] = [],
     messages: string[] = [];
   const visit = (v: unknown, depth = 0): void => {
@@ -109,7 +120,7 @@ export function isOverflow(error: unknown): error is WorkError {
     )
   );
 }
-function outputMembers(envelope: Envelope) {
+function outputMembers(envelope: Envelope): string[] {
   if (envelope.operation === 'detect_language') return ['parts'];
   if (envelope.operation === 'generate_artifacts')
     return Object.keys(envelope.requested_outputs);
@@ -127,9 +138,12 @@ function completionResult(
   outer: unknown,
   envelope: Envelope,
   stat: CallStat,
-): Record<string, unknown> {
+): unknown {
   const parsed = outer as {
-    choices?: { finish_reason?: unknown; message?: { content?: unknown } }[];
+    choices?: Array<{
+      finish_reason?: unknown;
+      message?: { content?: unknown };
+    }>;
     usage?: Record<string, unknown>;
   } | null;
   const choice = parsed?.choices?.[0];
@@ -151,7 +165,7 @@ function completionResult(
   if (typeof choice?.message?.content !== 'string')
     throw new WorkError('ai_invalid_response', 'invalid_response', true);
   try {
-    const result = JSON.parse(choice.message.content);
+    const result: unknown = JSON.parse(choice.message.content);
     if (result === null || typeof result !== 'object' || Array.isArray(result))
       throw new Error('invalid_completion_object');
     parseTopLevel(result, outputMembers(envelope));
@@ -161,19 +175,21 @@ function completionResult(
   }
 }
 export class AiClient {
-  fetcher;
-  observe;
-  semaphore;
-  pool;
+  readonly semaphore: PrioritySemaphore;
+  private readonly pool: ProviderPool;
   constructor(
     concurrency: number,
-    configuration: () => AiConfig,
-    fetcher = fetch,
-    observe: AiObserver = () => {},
-    now = Date.now,
+    configuration: () => AiConfiguration,
+    private readonly fetcher: Fetch = fetch,
+    private readonly observe: (
+      model: string,
+      operation: AiOperation,
+      mode: 'joint' | 'single',
+      outcome: 'succeeded' | 'failed',
+      bytes: number,
+    ) => void = () => {},
+    now: () => number = Date.now,
   ) {
-    this.fetcher = fetcher;
-    this.observe = observe;
     this.semaphore = new PrioritySemaphore(concurrency);
     this.pool = new ProviderPool(configuration, now);
   }
@@ -184,7 +200,7 @@ export class AiClient {
     order: WorkOrder,
     signal: AbortSignal,
     onStat: (stat: CallStat) => void,
-  ) {
+  ): Promise<unknown> {
     // Historical task snapshots describe the protocol, never current routing or credentials.
     if (snapshot.ai_envelope_protocol_version !== 1)
       throw new WorkError(
@@ -207,13 +223,13 @@ export class AiClient {
   health() {
     return this.pool.health();
   }
-  async attempt(
-    provider: Provider,
+  private async attempt(
+    provider: AiProvider,
     instruction: string,
     envelope: Envelope,
     signal: AbortSignal,
     onStat: (stat: CallStat) => void,
-  ) {
+  ): Promise<unknown> {
     const body = JSON.stringify({
       model: provider.model,
       messages: [

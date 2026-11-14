@@ -1,18 +1,4 @@
 import type { Config } from '../config/index.js';
-import type { Repository } from '../db/repository.js';
-import type {
-  CompactEntry,
-  FeatureKind,
-  FeatureDecision,
-  GeneratePayload,
-} from '../db/types.js';
-type BackfillSpecs = ReturnType<typeof backfillSpecs>;
-interface PlanOptions {
-  continuation?: BackfillSpecs;
-  ignoreScope?: boolean;
-  force?: boolean;
-}
-export type AdmissionPlan = ReturnType<AdmissionPolicy['plan']>;
 import {
   backfillSpecs,
   generationSnapshot,
@@ -21,15 +7,29 @@ import {
 import { evaluateScope } from '../config/scope.js';
 import { translationEligibility } from '../features/translation/index.js';
 import { summaryEligibility } from '../features/summary/index.js';
+import type { Admission, CompactEntry, Repository } from '../db/repository.js';
+import type {
+  BackfillPayload,
+  FeatureKind,
+  GeneratePayload,
+  RetryPolicy,
+} from '../db/documents.js';
 import { ApiError } from '../obs/errors.js';
+
+export interface AdmissionPlan {
+  decisions: Admission[];
+  payload: GeneratePayload | null;
+  retry: RetryPolicy;
+  outcomes: Partial<Record<FeatureKind, string>>;
+}
 function continuedPayload(
   due: FeatureKind[],
-  specs: BackfillSpecs,
+  specs: ReturnType<typeof backfillSpecs>,
   sourceUnits: number,
 ): GeneratePayload {
   return {
     schema_version: 1,
-    requested_features: due,
+    requested_features: due as GeneratePayload['requested_features'],
     ai: specs.ai,
     retry_policy: specs.retry_policy,
     ...(due.includes('translation')
@@ -57,29 +57,28 @@ function continuedPayload(
       : {}),
   };
 }
-function admissionState(skip: string | null, scheduled: boolean) {
+function admissionState(
+  skip: string | null,
+  scheduled: boolean,
+): Admission['state'] {
   if (skip) return 'skipped';
   return scheduled ? 'scheduled' : 'pending';
 }
 export class AdmissionPolicy {
-  config;
-  requireGate;
-  observe;
   constructor(
-    config: Config,
-    requireGate: () => void,
-    observe: (kind: FeatureKind, outcome: string) => void = () => {},
-  ) {
-    this.config = config;
-    this.requireGate = requireGate;
-    this.observe = observe;
-  }
-  requireEnabled(features: FeatureKind[]) {
+    private readonly config: Config,
+    private readonly requireGate: () => void,
+    private readonly observe: (
+      kind: FeatureKind,
+      outcome: string,
+    ) => void = () => {},
+  ) {}
+  requireEnabled(features: Array<FeatureKind | 'digest'>): void {
     this.requireGate();
     if (features.some((feature) => !this.config.features[feature].enabled))
       throw new ApiError(409, 'feature_disabled');
   }
-  enabledFeatures() {
+  enabledFeatures(): FeatureKind[] {
     return (['translation', 'summary'] as const).filter(
       (kind) => this.config.features[kind].enabled,
     );
@@ -88,12 +87,16 @@ export class AdmissionPolicy {
     entry: CompactEntry,
     blockCount: number,
     requested = this.enabledFeatures(),
-    options: PlanOptions = {},
-  ) {
+    options: {
+      continuation?: BackfillPayload;
+      force?: boolean;
+      ignoreScope?: boolean;
+    } = {},
+  ): AdmissionPlan {
     if (!options.continuation) this.requireEnabled(requested);
     const specs = options.continuation ?? backfillSpecs(this.config, requested);
-    const decisions: FeatureDecision[] = [];
-    const outcomes: Partial<Record<FeatureKind, string>> = {};
+    const decisions: Admission[] = [];
+    const outcomes: AdmissionPlan['outcomes'] = {};
     for (const kind of requested) {
       const work = specs[kind];
       if (!work) throw new Error('missing_admission_snapshot');
@@ -152,7 +155,7 @@ export class AdmissionPolicy {
     entryId: number,
     plan: AdmissionPlan,
     onlyMissing = false,
-  ) {
+  ): boolean {
     const result = repository.admit(
       entryId,
       plan.decisions,

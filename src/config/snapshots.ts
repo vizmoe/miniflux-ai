@@ -1,12 +1,15 @@
-import { durationMs, languageIdentity } from './primitives.js';
 import type { Config, DigestJob } from './index.js';
+import { durationMs, languageIdentity } from './primitives.js';
 import type {
   AiExecution,
+  BackfillPayload,
+  DigestSnapshot,
   FeatureKind,
   GeneratePayload,
-  DigestSnapshot,
-} from '../db/types.js';
-export const retrySnapshot = (c: Config) => ({
+  RetryPolicy,
+} from '../db/documents.js';
+
+export const retrySnapshot = (c: Config): RetryPolicy => ({
   initial_delay_ms: durationMs(c.queue.retry.initial_delay),
   max_delay_ms: durationMs(c.queue.retry.max_delay),
   multiplier: c.queue.retry.multiplier,
@@ -24,9 +27,9 @@ export function generationSnapshot(
 ): GeneratePayload {
   return {
     schema_version: 1,
-    requested_features: (['translation', 'summary'] as const).filter((k) =>
-      features.includes(k),
-    ),
+    requested_features: ['translation', 'summary'].filter((k) =>
+      features.includes(k as FeatureKind),
+    ) as GeneratePayload['requested_features'],
     ai: aiSnapshot(),
     retry_policy: retrySnapshot(c),
     ...(features.includes('translation')
@@ -55,7 +58,13 @@ export function generationSnapshot(
       : {}),
   };
 }
-export function backfillSpecs(c: Config, features: FeatureKind[]) {
+export function backfillSpecs(
+  c: Config,
+  features: FeatureKind[],
+): Pick<
+  BackfillPayload,
+  'ai' | 'retry_policy' | 'translation' | 'summary' | 'requested_features'
+> {
   const generation = generationSnapshot(
     c,
     features,
@@ -86,7 +95,7 @@ export function backfillSpecs(c: Config, features: FeatureKind[]) {
       : {}),
   };
 }
-export function skipLanguages(c: Config) {
+export function skipLanguages(c: Config): string[] {
   return c.features.translation.skip_languages === ''
     ? []
     : [

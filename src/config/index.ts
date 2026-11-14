@@ -16,7 +16,8 @@ import {
 } from './primitives.js';
 import { DEFAULT_PROMPTS } from './prompts.js';
 import { scopeSchema } from './scope.js';
-function transformString<T>(fn: (value: string) => T) {
+
+function transformString(fn: (v: string) => string) {
   return z.string().transform((v, ctx) => {
     try {
       return fn(v);
@@ -44,10 +45,10 @@ function cronRange(item: string, max: number): [number, number, number] | null {
   const match = /^(\*|\d+(?:-\d+)?)(?:\/(\d+))?$/.exec(item);
   if (!match) return null;
   const step = Number(match[2] ?? 1);
-  let start, end;
+  let start: number, end: number;
   if (match[1] === '*') [start, end] = [0, max];
-  else if (match[1].includes('-'))
-    [start, end] = match[1].split('-').map(Number);
+  else if (match[1]!.includes('-'))
+    [start, end] = match[1]!.split('-').map(Number) as [number, number];
   else {
     start = Number(match[1]);
     end = match[2] ? max : start;
@@ -55,8 +56,8 @@ function cronRange(item: string, max: number): [number, number, number] | null {
   if (!step || start > end || end > max) return null;
   return [start, end, step];
 }
-function singletonCronField(field: string, max: number) {
-  const values = new Set();
+function singletonCronField(field: string, max: number): boolean {
+  const values = new Set<number>();
   for (const item of field.split(',')) {
     const range = cronRange(item, max);
     if (!range) return false;
@@ -81,7 +82,8 @@ function cronSchema(digest = false) {
       // Digest jobs must expand to exactly one minute and hour, including ranges and steps.
       return (
         !digest ||
-        (singletonCronField(fields[0], 59) && singletonCronField(fields[1], 23))
+        (singletonCronField(fields[0]!, 59) &&
+          singletonCronField(fields[1]!, 23))
       );
     } catch {
       return false;
@@ -157,6 +159,7 @@ const digestJobSchema = z
         message: 'all partitions only',
       });
   });
+
 const secret = z
   .string()
   .min(1)
@@ -191,6 +194,9 @@ export const aiConfigSchema = z
     (v) => new Set(v.providers.map((p) => p.id)).size === v.providers.length,
     { message: 'duplicate_provider_id', path: ['providers'] },
   );
+export type AiProvider = z.infer<typeof providerSchema>;
+export type AiConfiguration = z.infer<typeof aiConfigSchema>;
+
 export const configSchema = z
   .object({
     output_language: language.prefault('zh-CN'),
@@ -331,7 +337,7 @@ export const configSchema = z
   })
   .strict()
   .superRefine((v, ctx) => {
-    const issue = (path: (string | number)[]) =>
+    const issue = (path: string[]) =>
       ctx.addIssue({
         code: 'custom',
         path,
@@ -355,16 +361,18 @@ export const configSchema = z
       for (const [path, value] of [
         ['miniflux.base_url', v.miniflux.base_url],
         ['miniflux.web_url', v.miniflux.web_url],
-        ...v.ai.providers.map((p, index) => [
-          `ai.providers.${index}.base_url`,
-          p.base_url,
-        ]),
-      ]) {
-        if (value?.startsWith('http:')) issue(path!.split('.'));
+        ...v.ai.providers.map(
+          (p, index) => [`ai.providers.${index}.base_url`, p.base_url] as const,
+        ),
+      ] as const) {
+        if (value?.startsWith('http:')) issue(path.split('.'));
       }
   });
-export function parseConfig(yamlText = '') {
-  let data;
+export type Config = z.infer<typeof configSchema>;
+export type DigestJob = Config['features']['digest']['jobs'][number];
+
+export function parseConfig(yamlText = ''): Config {
+  let data: unknown;
   try {
     const document = parseDocument(yamlText, { uniqueKeys: true });
     if (document.errors.length) throw new Error('invalid_yaml_document');
@@ -379,8 +387,8 @@ export function parseConfig(yamlText = '') {
     ]);
   return parsed.data;
 }
-export function loadConfig(path = './config.yaml') {
-  let yaml;
+export function loadConfig(path = './config.yaml'): Config {
+  let yaml: string;
   try {
     yaml = readFileSync(path, 'utf8');
   } catch {
@@ -388,12 +396,7 @@ export function loadConfig(path = './config.yaml') {
   }
   return parseConfig(yaml);
 }
-export type Config = z.infer<typeof configSchema>;
-export type AiConfig = Config['ai'];
-export type Provider = AiConfig['providers'][number];
-export type DigestJob = Config['features']['digest']['jobs'][number];
-
-export function redactConfig(config: Config) {
+export function redactConfig(config: Config): unknown {
   const copy = structuredClone(config);
   copy.miniflux.api_key = '[REDACTED]';
   for (const provider of copy.ai.providers) provider.api_key = '[REDACTED]';

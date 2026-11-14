@@ -1,27 +1,28 @@
-import type { Config } from '../../config/index.js';
-import type { DigestRepository } from '../../db/digest.js';
-import type { Repository } from '../../db/repository.js';
-import type { DigestFeed, Task } from '../../db/types.js';
-import type { MinifluxClient } from '../../miniflux/client.js';
-import type { BindingController } from '../../miniflux/binding.js';
-import type { MinifluxSourceReader } from '../../source/index.js';
-import type { TaskContext } from '../../queue/index.js';
-import type { DigestGenerator, DigestInput } from './generation.js';
 import {
   canonicalJson,
   durationMs,
   normalizeBaseUrl,
 } from '../../config/primitives.js';
 import { digestSnapshot } from '../../config/snapshots.js';
+import type { Config } from '../../config/index.js';
+import type { DigestRepository } from '../../db/digest.js';
 import { feedPath } from '../../db/digest.js';
+import type { Repository, Task } from '../../db/repository.js';
 import { backoff } from '../../db/repository.js';
 import { digestPayloadSchema } from '../../db/documents.js';
+import type { FeedRecord } from '../../db/schema.js';
+import type { MinifluxClient, Feed } from '../../miniflux/client.js';
+import type { BindingController } from '../../miniflux/binding.js';
+import type { SourceReader } from '../../source/index.js';
+import type { TaskContext } from '../../queue/index.js';
+import type { DigestGenerator } from './generation.js';
 import { renderDigest } from './render.js';
 import { extractSemanticBlocks } from '../../html/blocks.js';
 import { parseSource } from '../../html/dom.js';
 import { digestStats } from '../../ai/stats.js';
 import { ApiError, WorkError } from '../../obs/errors.js';
-function feedFailure(error: unknown) {
+
+function feedFailure(error: unknown): string {
   if (error instanceof ApiError) return error.code;
   if (error instanceof WorkError)
     return error.detail.failure_class === 'not_found'
@@ -30,44 +31,30 @@ function feedFailure(error: unknown) {
   return 'provisioning_failed';
 }
 export class DigestController {
-  config;
-  repository;
-  shared;
-  client;
-  binding;
-  source;
-  generator;
-  notifyActivation;
-  timers = new Map<string, NodeJS.Timeout>();
-  flights = new Map<string, Promise<void>>();
-  attempts = new Map<string, number>();
-  controller = new AbortController();
+  private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly flights = new Map<string, Promise<void>>();
+  private readonly attempts = new Map<string, number>();
+  private readonly controller = new AbortController();
   constructor(
-    config: Config,
-    repository: DigestRepository,
-    shared: Repository,
-    client: MinifluxClient,
-    binding: BindingController,
-    source: MinifluxSourceReader,
-    generator: DigestGenerator,
-    notifyActivation: () => void,
-  ) {
-    this.config = config;
-    this.repository = repository;
-    this.shared = shared;
-    this.client = client;
-    this.binding = binding;
-    this.source = source;
-    this.generator = generator;
-    this.notifyActivation = notifyActivation;
-  }
-  currentSnapshot(jobId: string) {
+    private readonly config: Config,
+    readonly repository: DigestRepository,
+    private readonly shared: Repository,
+    private readonly client: Pick<
+      MinifluxClient,
+      'feed' | 'feeds' | 'createFeed' | 'importEntry'
+    >,
+    private readonly binding: BindingController,
+    private readonly source: SourceReader,
+    private readonly generator: DigestGenerator,
+    private readonly notifyActivation: () => void,
+  ) {}
+  private currentSnapshot(jobId: string) {
     const job =
       this.config.features.digest.enabled &&
       this.config.features.digest.jobs.find((j) => j.id === jobId);
     return job ? digestSnapshot(this.config, job) : undefined;
   }
-  activeFeeds() {
+  private activeFeeds(): FeedRecord[] {
     return this.repository
       .feeds()
       .filter(
@@ -76,7 +63,7 @@ export class DigestController {
           this.repository.continuationSnapshot(f.job_id, f.partition_key),
       );
   }
-  async reconcile() {
+  async reconcile(): Promise<void> {
     if (!this.binding.open || this.controller.signal.aborted) return;
     const core = await this.binding.check();
     if (!core.ready) return;
@@ -92,9 +79,9 @@ export class DigestController {
       this.activeFeeds().map((feed) => this.reconcileFeed(feed)),
     );
   }
-  reconcileFeed(feed: DigestFeed) {
+  private reconcileFeed(feed: FeedRecord): Promise<void> {
     const key = `${feed.job_id}/${feed.partition_key}`;
-    if (this.flights.has(key)) return this.flights.get(key);
+    if (this.flights.has(key)) return this.flights.get(key)!;
     const remaining = (feed.next_attempt_at ?? 0) - this.shared.now();
     if (remaining > 0) {
       this.scheduleFeed(feed, remaining);
@@ -104,7 +91,7 @@ export class DigestController {
     this.flights.set(key, promise);
     return promise;
   }
-  scheduleFeed(feed: DigestFeed, delay: number) {
+  private scheduleFeed(feed: FeedRecord, delay: number): void {
     const key = `${feed.job_id}/${feed.partition_key}`;
     if (this.timers.has(key) || this.controller.signal.aborted) return;
     this.timers.set(
@@ -115,7 +102,10 @@ export class DigestController {
       }, delay),
     );
   }
-  async resolveFeed(feed: DigestFeed, expectedId: number | null) {
+  private async resolveFeed(
+    feed: FeedRecord,
+    expectedId: number | null,
+  ): Promise<Feed> {
     let found;
     if (expectedId !== null) {
       found = await this.client.feed(expectedId, this.controller.signal);
@@ -138,7 +128,7 @@ export class DigestController {
       throw new ApiError(503, 'feed_url_mismatch');
     return found;
   }
-  async feedPass(feed: DigestFeed) {
+  private async feedPass(feed: FeedRecord): Promise<void> {
     const key = `${feed.job_id}/${feed.partition_key}`;
     const current = this.currentSnapshot(feed.job_id),
       snapshot =
@@ -150,7 +140,7 @@ export class DigestController {
       clearTimeout(this.timers.get(key));
       this.timers.delete(key);
     }
-    let failure = null;
+    let failure: string | null = null;
     try {
       if (
         current &&
@@ -191,12 +181,12 @@ export class DigestController {
       this.scheduleFeed(feed, wait);
     }
   }
-  async resumeWindows() {
+  async resumeWindows(): Promise<void> {
     if (!this.binding.open) return;
     for (const window of this.repository.incompleteWindows())
       this.repository.select(window.id);
   }
-  async activate() {
+  async activate(): Promise<void> {
     if (this.controller.signal.aborted) return;
     const core = await this.binding.check();
     this.repository.activate(
@@ -206,7 +196,7 @@ export class DigestController {
   async select(
     jobId: string,
     end: number,
-    trigger: 'manual' | 'scheduled',
+    trigger: 'scheduled' | 'manual',
     partition?: string,
   ) {
     this.binding.requireOpen();
@@ -234,7 +224,7 @@ export class DigestController {
     void this.reconcile().catch(() => {});
     return result;
   }
-  async run(task: Task<'digest'>, context: TaskContext) {
+  async run(task: Task, context: TaskContext): Promise<void> {
     const payload = digestPayloadSchema.parse(task.payload),
       run = this.repository.run(payload.digest_run_id);
     if (run?.output_feed_id == null)
@@ -252,7 +242,7 @@ export class DigestController {
       const artifact = snapshot.summary_reuse_enabled
         ? this.shared.readySummary(entry.entry_id, snapshot.output_language)
         : undefined;
-      let input: DigestInput;
+      let input: { kind: 'summary_artifact' | 'source'; text: string };
       if (artifact)
         input = {
           kind: 'summary_artifact',
@@ -344,15 +334,15 @@ export class DigestController {
       }),
     };
   }
-  get importReady() {
+  get importReady(): boolean {
     return this.binding.lastStatus.ready && this.binding.open;
   }
-  stop() {
+  stop(): void {
     this.controller.abort();
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
   }
-  async drained() {
+  async drained(): Promise<void> {
     await Promise.allSettled(this.flights.values());
   }
 }

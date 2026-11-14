@@ -1,24 +1,4 @@
 import { z } from 'zod';
-import type { Config } from '../config/index.js';
-import type { Repository } from '../db/repository.js';
-import type {
-  CompactEntry,
-  Task,
-  BackfillPayload,
-  BackfillProgress,
-} from '../db/types.js';
-import type { MinifluxClient, MinifluxFeed } from '../miniflux/client.js';
-import type { LanguageAnalyzer } from '../lang/review.js';
-import type { LanguageFacts } from '../lang/index.js';
-import type { AdmissionPolicy } from '../runtime/admission.js';
-type PreparedEntry = ReturnType<Ingest['normalize']>;
-interface IngestionStatus {
-  rejected_entry_count: number;
-  last_rejected_entry_at: number | null;
-  poller_state: string;
-  poller_reason: string | null;
-  last_poll_failure_at: number | null;
-}
 import {
   LANGUAGE_REVIEW_BATCH_TIMEOUT_MS,
   WEBHOOK_FEED_RESOLUTION_BUDGET,
@@ -29,16 +9,30 @@ import { extractSemanticBlocks } from '../html/blocks.js';
 import { parseSource } from '../html/dom.js';
 import { markerShapedIdCount } from '../html/ownership.js';
 import { sourceFingerprint } from '../source/index.js';
+import type { Config } from '../config/index.js';
+import type { MinifluxClient } from '../miniflux/client.js';
+import type { LanguageAnalyzer, LanguageEvidence } from '../lang/review.js';
+import type { ArticleLanguageFacts } from '../lang/index.js';
+import type {
+  AiExecution,
+  BackfillPayload,
+  BackfillProgress,
+} from '../db/documents.js';
+import type { AdmissionPlan, AdmissionPolicy } from '../runtime/admission.js';
+import type { CompactEntry, Repository, Task } from '../db/repository.js';
 import {
   backfillPayloadSchema,
   backfillProgressSchema,
 } from '../db/documents.js';
 import { ApiError, WorkError } from '../obs/errors.js';
+
+export type RejectionReason =
+  | 'entry_metadata_invalid'
+  | 'feed_metadata_invalid'
+  | 'category_metadata_invalid';
 class MetadataError extends Error {
-  reason;
-  constructor(reason: string) {
+  constructor(readonly reason: RejectionReason) {
     super(reason);
-    this.reason = reason;
   }
 }
 const entryFields = z.object({
@@ -59,50 +53,49 @@ const record = (v: unknown): Record<string, unknown> =>
   v && typeof v === 'object' && !Array.isArray(v)
     ? (v as Record<string, unknown>)
     : {};
+interface Prepared {
+  entry: CompactEntry;
+  fingerprint: string;
+  blockCount: number;
+  language: LanguageEvidence;
+}
 export class Ingest {
-  repository;
-  client;
-  detector;
-  admission;
-  config;
-  gate;
-  observe;
-  status: IngestionStatus = {
+  readonly status = {
     rejected_entry_count: 0,
-    last_rejected_entry_at: null,
+    last_rejected_entry_at: null as number | null,
     poller_state: 'initializing',
-    poller_reason: null,
-    last_poll_failure_at: null,
+    poller_reason: null as string | null,
+    last_poll_failure_at: null as number | null,
   };
-  bootstrapFlight?: Promise<void>;
-  pollFlight?: Promise<void>;
-  controller = new AbortController();
-  stop() {
+  private bootstrapFlight?: Promise<void>;
+  private pollFlight?: Promise<void>;
+  private readonly controller = new AbortController();
+  stop(): void {
     this.controller.abort();
   }
   constructor(
-    repository: Repository,
-    client: MinifluxClient,
-    detector: LanguageAnalyzer,
-    admission: AdmissionPolicy,
-    config: Config,
-    gate: () => boolean,
-    observe: (source: string, reason: string, id: number) => void = () => {},
-  ) {
-    this.repository = repository;
-    this.client = client;
-    this.detector = detector;
-    this.admission = admission;
-    this.config = config;
-    this.gate = gate;
-    this.observe = observe;
-  }
-  reject(source: string, reason: string, id: number) {
+    private readonly repository: Repository,
+    private readonly client: MinifluxClient,
+    private readonly detector: LanguageAnalyzer,
+    private readonly admission: AdmissionPolicy,
+    private readonly config: Config,
+    private readonly gate: () => boolean,
+    private readonly observe: (
+      source: 'poll' | 'backfill',
+      reason: RejectionReason,
+      entryId: number,
+    ) => void = () => {},
+  ) {}
+  private reject(
+    source: 'poll' | 'backfill',
+    reason: RejectionReason,
+    id: number,
+  ): void {
     this.status.rejected_entry_count++;
     this.status.last_rejected_entry_at = this.repository.now();
     this.observe(source, reason, id);
   }
-  safeIds(page: unknown[]): number[] {
+  private safeIds(page: unknown[]): number[] {
     const values = page.map((v) => record(v).id);
     if (values.some((v) => !safeId.safeParse(v).success))
       throw new WorkError(
@@ -112,12 +105,12 @@ export class Ingest {
       );
     return values as number[];
   }
-  normalize(raw: unknown, resolvedFeed?: MinifluxFeed) {
+  private normalize(raw: unknown, resolvedFeed?: unknown): Prepared {
     const object = record(raw),
       id = safeId.parse(object.id);
     const entry = entryFields.safeParse(raw);
     if (!entry.success) throw new MetadataError('entry_metadata_invalid');
-    let published;
+    let published: number;
     try {
       published = parseInstant(entry.data.published_at);
     } catch {
@@ -155,15 +148,15 @@ export class Ingest {
       language,
     };
   }
-  async resolveLanguages(
-    prepared: PreparedEntry[],
+  private async resolveLanguages(
+    prepared: Prepared[],
     signal: AbortSignal,
-    snapshot = aiSnapshot(),
-  ) {
+    snapshot: AiExecution = aiSnapshot(),
+  ): Promise<void> {
     signal.throwIfAborted();
     if (!this.gate()) throw new ApiError(503, 'ingestion_not_ready');
     const budget = AbortSignal.timeout(LANGUAGE_REVIEW_BATCH_TIMEOUT_MS);
-    const unique = new Map<number, Promise<LanguageFacts>>();
+    const unique = new Map<number, Promise<ArticleLanguageFacts>>();
     // Validate metadata for the entire batch before any model request. Share one
     // wall-clock budget including time waiting for the common AI semaphore.
     await Promise.all(
@@ -189,7 +182,7 @@ export class Ingest {
     signal.throwIfAborted();
     if (!this.gate()) throw new ApiError(503, 'ingestion_not_ready');
   }
-  bootstrap() {
+  bootstrap(): Promise<void> {
     if (this.repository.cursor() !== undefined) return Promise.resolve();
     if (this.bootstrapFlight) return this.bootstrapFlight;
     this.bootstrapFlight = (async () => {
@@ -218,7 +211,7 @@ export class Ingest {
     });
     return this.bootstrapFlight;
   }
-  async webhook(body: unknown, signal?: AbortSignal) {
+  async webhook(body: unknown, signal?: AbortSignal): Promise<void> {
     signal = signal
       ? AbortSignal.any([signal, this.controller.signal])
       : this.controller.signal;
@@ -227,7 +220,7 @@ export class Ingest {
     const payload = record(body);
     if (!Array.isArray(payload.entries))
       throw new ApiError(503, 'webhook_batch_invalid');
-    const entries = payload.entries;
+    const entries: unknown[] = payload.entries;
     this.safeIds(entries);
     const outputs = this.repository.outputFeedIds();
     const candidates = entries.filter(
@@ -240,9 +233,9 @@ export class Ingest {
       throw new ApiError(503, 'feed_metadata_invalid');
     if (ids.length > WEBHOOK_FEED_RESOLUTION_BUDGET)
       throw new ApiError(503, 'webhook_feed_budget_exceeded');
-    const feeds = new Map<number, MinifluxFeed>();
-    for (const id of ids)
-      feeds.set(id as number, await this.client.feed(id as number, signal));
+    const feeds = new Map<number, unknown>();
+    for (const id of ids as number[])
+      feeds.set(id, await this.client.feed(id, signal));
     const normalized = candidates.map((raw) =>
       this.normalize(raw, feeds.get(Number(record(raw).feed_id))),
     );
@@ -258,14 +251,14 @@ export class Ingest {
           this.admission.apply(this.repository, item.entry.entry_id, item.plan);
     });
   }
-  poll(signal?: AbortSignal) {
+  poll(signal?: AbortSignal): Promise<void> {
     if (this.pollFlight) return this.pollFlight;
     this.pollFlight = this.pollCycle(signal).finally(() => {
       this.pollFlight = undefined;
     });
     return this.pollFlight;
   }
-  async pollCycle(signal?: AbortSignal) {
+  private async pollCycle(signal?: AbortSignal): Promise<void> {
     signal = signal
       ? AbortSignal.any([signal, this.controller.signal])
       : this.controller.signal;
@@ -306,10 +299,14 @@ export class Ingest {
       throw error;
     }
   }
-  async pollPage(page: unknown[], ids: number[], signal: AbortSignal) {
+  private async pollPage(
+    page: unknown[],
+    ids: number[],
+    signal: AbortSignal,
+  ): Promise<void> {
     const outputs = this.repository.outputFeedIds();
-    const normalized = [],
-      rejected = [];
+    const normalized: Prepared[] = [],
+      rejected: Array<{ id: number; reason: RejectionReason }> = [];
     for (const raw of page) {
       const id = Number(record(raw).id);
       if (outputs.has(Number(record(raw).feed_id)) || this.repository.entry(id))
@@ -335,7 +332,10 @@ export class Ingest {
     });
     for (const r of rejected) this.reject('poll', r.reason, r.id);
   }
-  backfillSelected(entry: CompactEntry, snapshot: BackfillPayload) {
+  private backfillSelected(
+    entry: CompactEntry,
+    snapshot: BackfillPayload,
+  ): boolean {
     if (snapshot.feed_ids.length && !snapshot.feed_ids.includes(entry.feed_id))
       return false;
     if (
@@ -347,20 +347,20 @@ export class Ingest {
       return false;
     return snapshot.until_ms === null || entry.published_at < snapshot.until_ms;
   }
-  backfillCandidates(
+  private backfillCandidates(
     page: unknown[],
     snapshot: BackfillPayload,
     next: BackfillProgress,
   ) {
     const outputs = this.repository.outputFeedIds();
-    const candidates = [];
-    const rejected = [];
+    const candidates: Prepared[] = [];
+    const rejected: Array<{ id: number; reason: RejectionReason }> = [];
     for (const raw of page) {
       const object = record(raw);
       const id = Number(object.id);
       next.after_entry_id = id;
       if (outputs.has(Number(object.feed_id))) continue;
-      let prepared;
+      let prepared: Prepared;
       try {
         prepared = this.normalize(raw);
       } catch (error) {
@@ -380,12 +380,16 @@ export class Ingest {
     }
     return { candidates, rejected };
   }
-  backfillOperations(
-    candidates: PreparedEntry[],
+  private backfillOperations(
+    candidates: Prepared[],
     snapshot: BackfillPayload,
     next: BackfillProgress,
   ) {
-    const operations = [];
+    const operations: Array<{
+      entry: CompactEntry;
+      fingerprint: string;
+      plan: AdmissionPlan;
+    }> = [];
     for (const prepared of candidates) {
       const id = prepared.entry.entry_id;
       // Another intake may have inserted this Entry while the review awaited
@@ -414,7 +418,7 @@ export class Ingest {
     }
     return operations;
   }
-  async backfill(task: Task<'ingest_backfill'>, signal: AbortSignal) {
+  async backfill(task: Task, signal: AbortSignal): Promise<void> {
     signal = AbortSignal.any([signal, this.controller.signal]);
     const snapshot = backfillPayloadSchema.parse(task.payload);
     let progress = backfillProgressSchema.parse(task.progress);
@@ -433,7 +437,7 @@ export class Ingest {
       const ids = this.safeIds(page);
       if (
         ids.some(
-          (id, i) => id <= (i === 0 ? progress.after_entry_id : ids[i - 1]),
+          (id, i) => id <= (i === 0 ? progress.after_entry_id : ids[i - 1]!),
         )
       )
         throw new WorkError(

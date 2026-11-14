@@ -1,16 +1,6 @@
-import type { Config } from '../config/index.js';
-import type { Repository } from '../db/repository.js';
-import type { Entry, LastError } from '../db/types.js';
-import type { MinifluxClient, MinifluxEntry } from '../miniflux/client.js';
-import type { MinifluxSourceReader } from '../source/index.js';
-import type { LanguageAnalyzer } from '../lang/review.js';
-import type { AdmissionPolicy } from './admission.js';
-import type { EntryLock } from './concurrency.js';
-type Inspection = Awaited<ReturnType<MinifluxSourceReader['inspect']>>;
-type RecoveryDecision = 'regenerated' | 'restored' | 'unchanged';
-export type RecoveryOutcome = RecoveryDecision | 'busy' | 'missing' | 'failed';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
+import type { Config } from '../config/index.js';
 import {
   ENTRY_RECOVERY_BATCH_SIZE,
   ENTRY_RECOVERY_RECHECK_MS,
@@ -18,32 +8,36 @@ import {
 } from '../config/constants.js';
 import { aiSnapshot, retrySnapshot } from '../config/snapshots.js';
 import { safeId } from '../config/primitives.js';
+import type { Repository } from '../db/repository.js';
+import type { Entry } from '../db/schema.js';
+import type { MinifluxClient, StoredEntry } from '../miniflux/client.js';
+import type { MinifluxSourceReader } from '../source/index.js';
 import { assertSourceCurrent } from '../source/index.js';
+import type { LastError } from '../db/documents.js';
 import { BlockPlanMismatch, compose } from '../html/composition.js';
 import { extractSemanticBlocks } from '../html/blocks.js';
 import { parseSource } from '../html/dom.js';
 import { canonicalSanitizerTree } from '../html/minifluxSanitizer.js';
+import type { LanguageAnalyzer } from '../lang/review.js';
 import { ApiError, safeWorkError } from '../obs/errors.js';
+import type { AdmissionPolicy } from './admission.js';
+import type { EntryLock } from './concurrency.js';
+
 const storedSchema = z.object({
   id: safeId,
   feed_id: safeId,
   title: z.string(),
   content: z.string(),
 });
+type Inspection = Awaited<ReturnType<MinifluxSourceReader['inspect']>>;
+export type RecoveryOutcome =
+  'unchanged' | 'restored' | 'regenerated' | 'busy' | 'missing' | 'failed';
+
 /** Reconciles only Entries we already own; never changes a Feed or fetches a page. */
 export class EntryRecovery {
-  repository;
-  client;
-  source;
-  detector;
-  admission;
-  lock;
-  config;
-  gate;
-  observe;
-  flight?: Promise<void>;
-  controller = new AbortController();
-  status = {
+  private flight?: Promise<void>;
+  private readonly controller = new AbortController();
+  readonly status = {
     checked: 0,
     restored: 0,
     regenerated: 0,
@@ -51,44 +45,34 @@ export class EntryRecovery {
     last_scan_at: null as number | null,
   };
   constructor(
-    repository: Repository,
-    client: MinifluxClient,
-    source: MinifluxSourceReader,
-    detector: LanguageAnalyzer,
-    admission: AdmissionPolicy,
-    lock: EntryLock,
-    config: Config,
-    gate: () => boolean,
-    observe: (
+    private readonly repository: Repository,
+    private readonly client: MinifluxClient,
+    private readonly source: MinifluxSourceReader,
+    private readonly detector: LanguageAnalyzer,
+    private readonly admission: AdmissionPolicy,
+    private readonly lock: EntryLock,
+    private readonly config: Config,
+    private readonly gate: () => boolean,
+    private readonly observe: (
       id: number,
       outcome: RecoveryOutcome,
       error?: LastError,
     ) => void = () => {},
-  ) {
-    this.repository = repository;
-    this.client = client;
-    this.source = source;
-    this.detector = detector;
-    this.admission = admission;
-    this.lock = lock;
-    this.config = config;
-    this.gate = gate;
-    this.observe = observe;
-  }
-  stop() {
+  ) {}
+  stop(): void {
     this.controller.abort();
   }
-  async drained() {
+  async drained(): Promise<void> {
     await this.flight;
   }
-  scan(signal?: AbortSignal) {
+  scan(signal?: AbortSignal): Promise<void> {
     if (this.flight) return this.flight;
     this.flight = this.scanBatch(signal).finally(() => {
       this.flight = undefined;
     });
     return this.flight;
   }
-  async scanBatch(signal?: AbortSignal) {
+  private async scanBatch(signal?: AbortSignal): Promise<void> {
     if (!this.gate()) return;
     signal = AbortSignal.any([
       this.controller.signal,
@@ -115,7 +99,7 @@ export class EntryRecovery {
       },
       signal,
     );
-    const snapshots = new Map<number, MinifluxEntry>();
+    const snapshots = new Map<number, StoredEntry>();
     for (const raw of page) {
       const parsed = storedSchema.safeParse(raw);
       if (parsed.success && ids.includes(parsed.data.id))
@@ -128,7 +112,10 @@ export class EntryRecovery {
     }
     this.status.last_scan_at = this.repository.now();
   }
-  decision(entry: Entry, inspection: Inspection): RecoveryDecision {
+  private decision(
+    entry: Entry,
+    inspection: Inspection,
+  ): 'unchanged' | 'restored' | 'regenerated' {
     const artifacts = this.repository.currentArtifacts(entry.entry_id);
     if (
       entry.source_fingerprint &&
@@ -155,7 +142,11 @@ export class EntryRecovery {
       throw error;
     }
   }
-  async check(id: number, signal?: AbortSignal, snapshot?: MinifluxEntry) {
+  async check(
+    id: number,
+    signal?: AbortSignal,
+    snapshot?: StoredEntry,
+  ): Promise<RecoveryOutcome> {
     signal = AbortSignal.any([
       this.controller.signal,
       ...(signal ? [signal] : []),
@@ -165,7 +156,7 @@ export class EntryRecovery {
       id,
       async () => {
         let outcome: RecoveryOutcome;
-        let failure;
+        let failure: LastError | undefined;
         try {
           const entry = this.repository.entry(id);
           if (!entry) throw new ApiError(404, 'entry_not_found');
@@ -205,10 +196,10 @@ export class EntryRecovery {
       signal,
     );
   }
-  async applyDecision(
+  private async applyDecision(
     entry: Entry,
     inspected: Inspection,
-    decision: RecoveryDecision,
+    decision: 'unchanged' | 'restored' | 'regenerated',
     signal: AbortSignal,
   ): Promise<RecoveryOutcome> {
     if (decision === 'regenerated') {
@@ -225,7 +216,11 @@ export class EntryRecovery {
     }
     return decision;
   }
-  async regenerate(entry: Entry, inspected: Inspection, signal: AbortSignal) {
+  private async regenerate(
+    entry: Entry,
+    inspected: Inspection,
+    signal: AbortSignal,
+  ): Promise<void> {
     const plan = extractSemanticBlocks(parseSource(inspected.source.content));
     const evidence = this.detector.prepare(inspected.source.title, plan.blocks);
     const language = await this.detector.resolve(

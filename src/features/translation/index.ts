@@ -1,12 +1,15 @@
-import type { TranslationPayload, TranslationWork } from '../../db/types.js';
-import type {
-  GenerationSource,
-  TranslationSpecification,
-  TranslationInspection,
-} from '../../generation/types.js';
 import { languageIdentity } from '../../config/primitives.js';
 import { isUsableSourceTitle, normalizeText } from '../../html/units.js';
 import { displayText, plainText } from '../../ai/text.js';
+import type {
+  TranslationWork,
+  TranslationPayload,
+} from '../../db/documents.js';
+import type {
+  GenerationSource,
+  TranslationInspection,
+  TranslationSpecification,
+} from '../../generation/types.js';
 import { matchingFormatting } from '../../html/inline.js';
 export function translationEligibility(
   title: string,
@@ -14,24 +17,27 @@ export function translationEligibility(
   primary: string | null,
   target: string,
   skip: string[],
-) {
+): 'no_translatable_content' | 'language_not_required' | null {
   if (!isUsableSourceTitle(title) && blockCount === 0)
     return 'no_translatable_content';
   return primary && [languageIdentity(target), ...skip].includes(primary)
     ? 'language_not_required'
     : null;
 }
-function inspectedBlock(value: unknown, counts: Map<string, number>) {
+function inspectedBlock(
+  value: unknown,
+  counts: Map<string, number>,
+): { id: string; text: string } | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
     return null;
-  const part = value as Record<string, unknown>;
+  const part = value as { id: string; text?: unknown };
   if (
-    counts.get(part.id as string) !== 1 ||
+    counts.get(part.id) !== 1 ||
     Object.keys(part).length !== 2 ||
     !plainText(part.text)
   )
     return null;
-  return { id: part.id as string, text: part.text };
+  return { id: part.id, text: part.text };
 }
 function translatedTitle(
   text: string | undefined,
@@ -56,7 +62,7 @@ export function inspectTranslation(
   };
   if (value === null || typeof value !== 'object' || Array.isArray(value))
     return result;
-  const candidate = value as Record<string, unknown>;
+  const candidate = value as { title?: unknown; blocks?: unknown };
   if (
     Object.keys(candidate).some((k) => !['title', 'blocks'].includes(k)) ||
     (!titleRequested && 'title' in candidate) ||
@@ -70,7 +76,7 @@ export function inspectTranslation(
   if ([...counts.keys()].some((id) => !source.blocks.some((b) => b.id === id)))
     return result;
   for (const sourceBlock of source.blocks) {
-    const b = candidate.blocks.find((v) => v?.id === sourceBlock.id);
+    const b: unknown = candidate.blocks.find((v) => v?.id === sourceBlock.id);
     const part = inspectedBlock(b, counts);
     if (part && matchingFormatting(sourceBlock.text, part.text))
       result.value.blocks.push(part);

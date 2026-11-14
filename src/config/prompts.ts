@@ -10,4 +10,4 @@ export const DEFAULT_PROMPTS = {
     overview:
       'Using only the prepared Digest items, write a concise non-empty overview and organize the items into meaningful sections in the Output language specified in the structured input.\nAssign every supplied item ID exactly once. Do not omit, duplicate, or invent IDs or facts, and do not emit URLs. Use non-empty section titles derived from the supplied content.\nWhen merging partial plans, preserve complete item coverage while consolidating the overview and sections into one coherent result.\nFollow the current operation and response schema defined by the application protocol instructions.',
   },
-};
+} as const;

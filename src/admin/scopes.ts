@@ -1,11 +1,12 @@
 import { z } from 'zod';
-import type { YamlConfiguration } from '../config/store.js';
 import type { Config } from '../config/index.js';
-import type { Scope } from '../config/scope.js';
 import { ConfigurationError } from '../config/index.js';
 import { canonicalJson, safeId } from '../config/primitives.js';
 import { scopeLocation } from '../config/scope.js';
+import type { Scope } from '../config/scope.js';
+import type { YamlConfiguration } from '../config/store.js';
 import { ApiError } from '../obs/errors.js';
+
 const ids = z
   .array(safeId)
   .max(10000)
@@ -22,6 +23,8 @@ const updateSchema = z
     blocklist: list,
   })
   .strict();
+type ListKey = 'feed_ids' | 'category_ids';
+
 /** A deny-then-allow prefix is equivalent to lists with blocklist priority.
  * Stop before any rule whose order or combined predicates carry other meaning.
  */
@@ -38,10 +41,7 @@ function lists(scope: Scope) {
     allowing ||= rule.action === 'allow';
     prefix.push(rule);
   }
-  const collect = (
-    action: 'allow' | 'deny',
-    key: 'feed_ids' | 'category_ids',
-  ) =>
+  const collect = (action: 'allow' | 'deny', key: ListKey) =>
     [
       ...new Set(
         prefix
@@ -65,7 +65,7 @@ function lists(scope: Scope) {
 function withLists(scope: Scope, data: z.infer<typeof updateSchema>): Scope {
   const current = lists(scope);
   const names = new Set(current.other_rules.map((rule) => rule.name));
-  const rules = [];
+  const rules: Scope['rules'] = [];
   for (const [action, selected] of [
     ['deny', data.blocklist],
     ['allow', data.allowlist],
@@ -88,13 +88,12 @@ function withLists(scope: Scope, data: z.infer<typeof updateSchema>): Scope {
     rules: [...rules, ...current.other_rules],
   };
 }
+
 export class ScopeSettings {
-  configuration;
-  active;
-  constructor(configuration: YamlConfiguration, active: Config) {
-    this.configuration = configuration;
-    this.active = active;
-  }
+  constructor(
+    private readonly configuration: YamlConfiguration,
+    private readonly active: Config,
+  ) {}
   view() {
     const { config, revision } = this.configuration.read();
     const describe = (id: string, name: string, enabled: boolean) => {
@@ -116,7 +115,7 @@ export class ScopeSettings {
       };
     };
     return {
-      source: 'yaml',
+      source: 'yaml' as const,
       revision,
       targets: [
         describe(

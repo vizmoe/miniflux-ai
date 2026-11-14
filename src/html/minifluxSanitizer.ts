@@ -1,8 +1,8 @@
 import { canonicalTree, isElement, parseSource } from './dom.js';
 import { trimTrailingCharacters } from '../runtime/text.js';
+
 // Sanitizer data adapted from Miniflux; Copyright The Miniflux Authors.
 // Apache-2.0; see THIRD_PARTY_NOTICES.md and licenses/Miniflux-Apache-2.0.txt.
-type ResourceResolver = (value: string) => string | null;
 const allowed = new Map<string, Set<string>>();
 for (const tag of 'aside blockquote b br caption cite code del dfn em figcaption figure hr i ins kbd p picture pre rp rt rtc ruby s small samp strong sub table tfoot thead tr u var wbr annotation annotation-xml maction merror mfrac mi mmultiscripts mn mo mover mpadded mphantom mprescripts mroot mrow ms mspace msqrt mstyle msub msubsup msup mtable mtd mtext mtr munder munderover semantics'.split(
   ' ',
@@ -49,23 +49,25 @@ const blockedResources = [
   'x.com/intent/tweet',
   'x.com/share',
 ];
-export function allowedSourceAttributes(element: Element): [string, string][] {
+export function allowedSourceAttributes(
+  element: Element,
+): Array<[string, string]> {
   return Array.from(element.attributes)
     .filter((a) => allowed.get(element.localName)?.has(a.name))
     .map((a) => [a.name, a.value]);
 }
-export function sanitize(content: string, baseUrl: string) {
+export function sanitize(content: string, baseUrl: string): string {
   const root = parseSource(content);
   sanitizeTree(root, baseUrl);
   return root.innerHTML;
 }
-function skipSrcsetSeparators(value: string, position: number) {
-  while (position < value.length && /[\t\n\f\r ,]/.test(value[position]))
+function skipSrcsetSeparators(value: string, position: number): number {
+  while (position < value.length && /[\t\n\f\r ,]/.test(value[position]!))
     position++;
   return position;
 }
-function srcsetCandidates(value: string) {
-  const candidates = [];
+function srcsetCandidates(value: string): Array<[string, string]> {
+  const candidates: Array<[string, string]> = [];
   const space = /[\t\n\f\r ]/;
   let position = 0;
   while (position < value.length) {
@@ -73,7 +75,7 @@ function srcsetCandidates(value: string) {
     const start = position;
     // Miniflux reads the URL up to ASCII whitespace, preserving embedded
     // commas in CDN paths and queries. Only trailing commas end a bare URL.
-    while (position < value.length && !space.test(value[position])) position++;
+    while (position < value.length && !space.test(value[position]!)) position++;
     let url = value.slice(start, position);
     if (!url) break;
     let descriptor = '';
@@ -90,13 +92,13 @@ function srcsetCandidates(value: string) {
   }
   return candidates;
 }
-function sourceResource(value: string, baseUrl: string) {
+function sourceResource(value: string, baseUrl: string): string | null {
   if (blockedResources.some((v) => value.includes(v))) return null;
   try {
     // Miniflux preserves absolute URL spelling and forces network paths to
     // HTTPS. WHATWG serialization would rewrite stored Source attributes.
     let resolved = value.startsWith('//') ? `https:${value}` : value;
-    let url;
+    let url: URL;
     try {
       url = new URL(resolved);
     } catch {
@@ -108,7 +110,9 @@ function sourceResource(value: string, baseUrl: string) {
     return null;
   }
 }
-function iframeResource(value: string) {
+
+type Resource = (value: string) => string | null;
+function iframeResource(value: string): string | null {
   try {
     const url = new URL(value),
       host = url.hostname.replace(/^www\./, '');
@@ -130,7 +134,7 @@ function iframeResource(value: string) {
     return null;
   }
 }
-function srcsetResource(value: string, resource: ResourceResolver) {
+function srcsetResource(value: string, resource: Resource): string | null {
   const candidates = srcsetCandidates(value).flatMap(([url, descriptor]) => {
     const cleaned = resource(url);
     if (!cleaned) return [];
@@ -139,7 +143,7 @@ function srcsetResource(value: string, resource: ResourceResolver) {
   });
   return candidates.join(', ') || null;
 }
-function validImageAttribute(key: string, value: string) {
+function validImageAttribute(key: string, value: string): boolean {
   if (['width', 'height'].includes(key)) return /^\+?[1-9]\d*$/.test(value);
   if (key === 'decoding') return ['sync', 'async', 'auto'].includes(value);
   if (key === 'fetchpriority') return ['high', 'low', 'auto'].includes(value);
@@ -149,8 +153,8 @@ function resourceAttribute(
   tag: string,
   key: string,
   value: string,
-  resource: ResourceResolver,
-) {
+  resource: Resource,
+): string | null {
   if (tag === 'iframe') return iframeResource(value);
   if (
     tag === 'img' &&
@@ -164,8 +168,8 @@ function resourceAttribute(
 function attributeValue(
   tag: string,
   attribute: Attr,
-  resource: ResourceResolver,
-) {
+  resource: Resource,
+): string | null {
   const { name: key, value } = attribute;
   if (!allowed.get(tag)!.has(key)) return null;
   if (tag === 'math' && key === 'xmlns')
@@ -177,7 +181,7 @@ function attributeValue(
     return resourceAttribute(tag, key, value, resource);
   return value;
 }
-function discardElement(node: Element) {
+function discardElement(node: Element): boolean {
   return (
     ['noscript', 'script', 'style'].includes(node.localName) ||
     node.hasAttribute('hidden') ||
@@ -186,7 +190,7 @@ function discardElement(node: Element) {
       ['0', '1'].includes(node.getAttribute('width') ?? ''))
   );
 }
-function lacksRequiredResource(node: Element) {
+function lacksRequiredResource(node: Element): boolean {
   const tag = node.localName;
   return (
     (tag === 'a' && !node.hasAttribute('href')) ||
@@ -196,7 +200,7 @@ function lacksRequiredResource(node: Element) {
       !node.hasAttribute('srcset'))
   );
 }
-function presentationAttributes(node: Element) {
+function presentationAttributes(node: Element): void {
   const tag = node.localName;
   if (tag === 'a' && !node.getAttribute('href')!.startsWith('#')) {
     node.setAttribute('rel', 'noopener noreferrer');
@@ -216,12 +220,12 @@ function presentationAttributes(node: Element) {
   }
 }
 /** Sanitizes an already parsed, caller-owned tree using the same model. */
-export function sanitizeTree(root: Element, baseUrl: string) {
-  const resource = (value: string) => sourceResource(value, baseUrl);
-  const walk = (node: ChildNode, depth: number): void => {
+export function sanitizeTree(root: HTMLElement, baseUrl: string): void {
+  const resource: Resource = (value) => sourceResource(value, baseUrl);
+  const walk = (node: Node, depth: number): void => {
     if (depth > 510) throw new Error('sanitizer_depth_exceeded');
     if (node.nodeType === 8) {
-      node.remove();
+      (node as ChildNode).remove();
       return;
     }
     if (!isElement(node)) return;
@@ -249,7 +253,7 @@ export function sanitizeTree(root: Element, baseUrl: string) {
   for (const child of Array.from(root.childNodes)) walk(child, 0);
 }
 /** Extra upstream presentation attributes are outside the Source signature. */
-export function canonicalSanitizerTree(content: string | Element) {
+export function canonicalSanitizerTree(content: string | HTMLElement): unknown {
   return canonicalTree(
     typeof content === 'string' ? parseSource(content) : content,
     allowedSourceAttributes,

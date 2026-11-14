@@ -1,17 +1,16 @@
 import { lastErrorSchema } from '../db/documents.js';
-import type { LastError } from '../db/types.js';
+import type { LastError } from '../db/documents.js';
+
 export class WorkError extends Error {
-  retryAfterMs;
-  detail;
+  readonly detail: LastError;
   constructor(
     code: string,
     failureClass: LastError['failure_class'],
     retryable: boolean,
-    retryAfterMs = 0,
+    readonly retryAfterMs = 0,
     fields: Partial<LastError> = {},
   ) {
     super(code);
-    this.retryAfterMs = retryAfterMs;
     this.detail = lastErrorSchema.parse({
       schema_version: 1,
       code,
@@ -26,18 +25,12 @@ export class WorkError extends Error {
   }
 }
 export class ApiError extends Error {
-  status;
-  code;
-  fields;
   constructor(
-    status: number,
-    code: string,
-    fields: Record<string, unknown> = {},
+    readonly status: number,
+    readonly code: string,
+    readonly fields: Record<string, unknown> = {},
   ) {
     super(code);
-    this.status = status;
-    this.code = code;
-    this.fields = fields;
   }
 }
 export class LeaseLost extends Error {
@@ -45,7 +38,7 @@ export class LeaseLost extends Error {
     super('lease_lost');
   }
 }
-export function safeWorkError(error: unknown) {
+export function safeWorkError(error: unknown): WorkError {
   if (error instanceof WorkError) return error;
   if (
     error instanceof Error &&
@@ -54,7 +47,7 @@ export function safeWorkError(error: unknown) {
     return new WorkError('request_timeout', 'timeout', true);
   return new WorkError('operation_failed', 'repository', true);
 }
-export function upstreamRequestId(headers: Headers) {
+export function upstreamRequestId(headers: Headers): string | null {
   const value = headers.get('x-request-id') ?? headers.get('request-id');
   return value && /^[A-Za-z0-9._:-]{1,128}$/.test(value) ? value : null;
 }

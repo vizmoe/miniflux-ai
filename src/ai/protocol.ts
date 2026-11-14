@@ -7,6 +7,7 @@ import {
   safeId,
   validDate,
 } from '../config/primitives.js';
+
 const block = z.object({ id: nonempty, text: nonempty }).strict();
 const blocks = z
   .array(block)
@@ -73,6 +74,7 @@ export const overviewResponseSchema = z
       .nonempty(),
   })
   .strict();
+export type Overview = z.infer<typeof overviewResponseSchema>;
 const preparedItem = z
   .object({
     id: safeId,
@@ -81,6 +83,7 @@ const preparedItem = z
     summary: nonempty,
   })
   .strict();
+export type PreparedItem = z.infer<typeof preparedItem>;
 export const requestSchemas = {
   detect_language: z
     .object({

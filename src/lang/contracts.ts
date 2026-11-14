@@ -1,12 +1,13 @@
 import { z } from 'zod';
-export type LanguageDiagnostic = z.infer<typeof languageDiagnosticSchema>;
 import { languageIdentity } from '../config/primitives.js';
 import { registeredLanguages } from './registry.js';
+
 /** Locale syntax alone accepts invented languages; require an IANA registration. */
 export const languageCodeSchema = z
   .string()
   .refine((value) => value === 'und' || registeredLanguages.has(value))
   .transform((value) => languageIdentity(value));
+
 export const languageDiagnosticSchema = z
   .object({
     source: z.enum(['local', 'llm', 'fallback']),
@@ -24,3 +25,4 @@ export const languageDiagnosticSchema = z
     duration_ms: z.number().nonnegative(),
   })
   .strict();
+export type LanguageDiagnostic = z.infer<typeof languageDiagnosticSchema>;

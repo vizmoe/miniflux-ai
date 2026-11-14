@@ -1,9 +1,3 @@
-import type { Repository } from '../db/repository.js';
-import type { MinifluxClient, MinifluxEntry } from '../miniflux/client.js';
-export interface Source {
-  title: string;
-  content: string;
-}
 import { WorkError } from '../obs/errors.js';
 import { createHash } from 'node:crypto';
 import { expandTemplate } from '../config/primitives.js';
@@ -12,7 +6,17 @@ import {
   computeSourceIntegritySignature,
   projectSource,
 } from '../html/ownership.js';
-export function sourceFingerprint(source: Source) {
+import type { Repository } from '../db/repository.js';
+import type { MinifluxClient, StoredEntry } from '../miniflux/client.js';
+
+export interface SourceProjection {
+  title: string;
+  content: string;
+}
+export interface SourceReader {
+  load(entryId: number, signal?: AbortSignal): Promise<SourceProjection>;
+}
+export function sourceFingerprint(source: SourceProjection): string {
   return createHash('sha256')
     .update(
       JSON.stringify([
@@ -24,22 +28,20 @@ export function sourceFingerprint(source: Source) {
 }
 export function assertSourceCurrent(
   fingerprint: string | null,
-  source: Source,
-) {
+  source: SourceProjection,
+): void {
   if (fingerprint !== null && fingerprint !== sourceFingerprint(source))
     throw new WorkError('source_changed', 'validation', false);
 }
-export class MinifluxSourceReader {
-  repository;
-  client;
-  constructor(repository: Repository, client: MinifluxClient) {
-    this.repository = repository;
-    this.client = client;
-  }
-  async load(entryId: number, signal?: AbortSignal) {
+export class MinifluxSourceReader implements SourceReader {
+  constructor(
+    private readonly repository: Repository,
+    private readonly client: MinifluxClient,
+  ) {}
+  async load(entryId: number, signal?: AbortSignal): Promise<SourceProjection> {
     return (await this.inspect(entryId, undefined, signal)).source;
   }
-  async inspect(entryId: number, stored?: MinifluxEntry, signal?: AbortSignal) {
+  async inspect(entryId: number, stored?: StoredEntry, signal?: AbortSignal) {
     const entry = this.repository.entry(entryId);
     if (!entry) throw new WorkError('entry_not_found', 'not_found', false);
     const ownership = this.repository.artifacts(entryId);

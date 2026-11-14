@@ -3,7 +3,8 @@ import { argumentsOf } from './config/cli.js';
 import { YamlConfiguration } from './config/store.js';
 import { createService } from './runtime/service.js';
 import { buildServer } from './server/index.js';
-async function main() {
+
+async function main(): Promise<void> {
   const args = argumentsOf();
   const configuration = new YamlConfiguration(args.path);
   const config = configuration.read().config;

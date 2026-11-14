@@ -1,14 +1,5 @@
-import type { YamlConfiguration } from '../config/store.js';
-import type { FeatureKind, ArtifactInput } from '../db/types.js';
-import type { AppLogger } from '../obs/index.js';
-export interface ServiceOptions {
-  root?: string;
-  now?: () => number;
-  fetch?: typeof fetch;
-  logger?: AppLogger;
-}
-export type Service = Awaited<ReturnType<typeof createService>>;
 import { MINIFLUX_SUPPORTED_VERSION } from '../config/constants.js';
+import type { YamlConfiguration } from '../config/store.js';
 import { ModelSettings } from '../admin/model.js';
 import { ScopeSettings } from '../admin/scopes.js';
 import { durationMs } from '../config/primitives.js';
@@ -16,7 +7,9 @@ import { Database } from '../db/database.js';
 import { Repository } from '../db/repository.js';
 import { DigestRepository } from '../db/digest.js';
 import { generatePayloadSchema } from '../db/documents.js';
+import type { FeatureKind } from '../db/documents.js';
 import { MinifluxClient } from '../miniflux/client.js';
+import type { Fetch } from '../miniflux/client.js';
 import { BindingController } from '../miniflux/binding.js';
 import { AiClient } from '../ai/client.js';
 import { ArtifactGenerator } from '../generation/index.js';
@@ -44,10 +37,17 @@ import { Ingest } from '../ingest/index.js';
 import { Queue } from '../queue/index.js';
 import { Scheduler } from '../scheduler/index.js';
 import { Metrics, createLogger } from '../obs/index.js';
+import type { SafeLogger } from '../obs/index.js';
 import { ApiError, safeWorkError } from '../obs/errors.js';
+
 export async function createService(
   configuration: YamlConfiguration,
-  options: ServiceOptions = {},
+  options: {
+    root?: string;
+    fetch?: Fetch;
+    logger?: SafeLogger;
+    now?: () => number;
+  } = {},
 ) {
   const config = configuration.read().config;
   const db = new Database(options.root),
@@ -130,7 +130,7 @@ export async function createService(
     },
     (kind, outcome) => metrics.admission(kind, outcome),
   );
-  let detector;
+  let detector: LanguageDetector;
   try {
     detector = await LanguageDetector.create();
   } catch (error) {
@@ -228,7 +228,7 @@ export async function createService(
     {
       generate_artifacts: async (task, context) => {
         const payload = generatePayloadSchema.parse(task.payload),
-          entry = repository.entry(task.entry_id)!;
+          entry = repository.entry(task.entry_id!)!;
         const loaded = await source.load(entry.entry_id, context.signal),
           root = parseSource(loaded.content),
           plan = payload.translation
@@ -275,7 +275,7 @@ export async function createService(
             repository.establishSourceFingerprint(entry.entry_id, fingerprint);
             repository.completeGeneration(
               task,
-              result.artifacts.map((artifact): ArtifactInput =>
+              result.artifacts.map((artifact) =>
                 artifact.kind === 'translation'
                   ? {
                       ...artifact,
@@ -318,7 +318,7 @@ export async function createService(
       },
     },
   );
-  const scheduler = new Scheduler(
+  const scheduler: Scheduler = new Scheduler(
     {
       gate: () => binding.open && modelSettings.configured,
       verify: () => binding.check(),
@@ -336,7 +336,7 @@ export async function createService(
       },
       failed: (operation) =>
         logger.log('error', 'operation_failed', {
-          operation: operation,
+          operation: operation as 'startup',
         }),
     },
     {
@@ -374,10 +374,10 @@ export async function createService(
     start() {
       if (started) return;
       started = true;
-      scheduler.start();
+      scheduler!.start();
       queue.start();
     },
-    async ready() {
+    async ready(): Promise<boolean> {
       try {
         return (
           db.ping() &&
@@ -392,7 +392,7 @@ export async function createService(
     async stop() {
       if (stopped) return;
       stopped = true;
-      scheduler.stop();
+      scheduler!.stop();
       binding.stop();
       ingest.stop();
       recovery.stop();
@@ -400,7 +400,7 @@ export async function createService(
       try {
         await queue.stop(durationMs(config.runtime.shutdown_grace_period));
         await Promise.all([
-          scheduler.drained(),
+          scheduler!.drained(),
           digest.drained(),
           recovery.drained(),
         ]);
@@ -415,3 +415,4 @@ export async function createService(
     },
   };
 }
+export type Service = Awaited<ReturnType<typeof createService>>;

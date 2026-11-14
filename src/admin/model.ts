@@ -1,15 +1,16 @@
 import { z } from 'zod';
-import type { YamlConfiguration } from '../config/store.js';
-import type { Config } from '../config/index.js';
-import type { ProviderHealth } from '../ai/providers.js';
 import {
   aiConfigSchema,
   ConfigurationError,
   providerSchema,
   redactConfig,
 } from '../config/index.js';
+import type { Config } from '../config/index.js';
 import { canonicalJson } from '../config/primitives.js';
+import type { YamlConfiguration } from '../config/store.js';
+import type { AiClient } from '../ai/client.js';
 import { ApiError } from '../obs/errors.js';
+
 const updateSchema = z
   .object({
     revision: z.string().regex(/^[a-f0-9]{64}$/),
@@ -28,24 +29,16 @@ const restartSettings = (c: Config) =>
     ...c,
     ai: { max_concurrent_requests: c.ai.max_concurrent_requests },
   });
+
 /** The management API edits the same file consulted before each AI call. */
 export class ModelSettings {
-  configuration;
-  startup;
-  health;
-  changed;
   constructor(
-    configuration: YamlConfiguration,
-    startup: Config,
-    health: () => ProviderHealth[],
-    changed = () => {},
-  ) {
-    this.configuration = configuration;
-    this.startup = startup;
-    this.health = health;
-    this.changed = changed;
-  }
-  get configured() {
+    private readonly configuration: YamlConfiguration,
+    private readonly startup: Config,
+    private readonly health: () => ReturnType<AiClient['health']>,
+    private readonly changed: () => void = () => {},
+  ) {}
+  get configured(): boolean {
     try {
       return this.configuration
         .read()
@@ -54,16 +47,16 @@ export class ModelSettings {
       return false;
     }
   }
-  requireConfigured() {
+  requireConfigured(): void {
     if (!this.configured) throw new ApiError(503, 'model_not_configured');
   }
-  restartRequired(config: Config) {
+  private restartRequired(config: Config): boolean {
     return restartSettings(config) !== restartSettings(this.startup);
   }
   configView() {
     const { config, revision } = this.configuration.read();
     return {
-      source: 'yaml',
+      source: 'yaml' as const,
       revision,
       restart_required: this.restartRequired(config),
       config: redactConfig(config),
@@ -74,7 +67,7 @@ export class ModelSettings {
     const health = this.health();
     return {
       revision,
-      source: 'yaml',
+      source: 'yaml' as const,
       restart_required: this.restartRequired(config),
       configured: config.ai.providers.some((p) => p.enabled),
       max_concurrent_requests: config.ai.max_concurrent_requests,
@@ -84,7 +77,7 @@ export class ModelSettings {
         api_key_configured: Boolean(api_key),
         health: health.find((h) => h.id === p.id) ?? {
           id: p.id,
-          state: p.enabled ? 'healthy' : 'disabled',
+          state: p.enabled ? ('healthy' as const) : ('disabled' as const),
           consecutive_failures: 0,
           retry_at: null,
           last_failure: null,

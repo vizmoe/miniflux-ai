@@ -1,19 +1,24 @@
 import { z } from 'zod';
-import type { LanguageDetector, LanguageFacts } from './index.js';
-import type { LanguageDiagnostic } from './contracts.js';
 import type { AiClient } from '../ai/client.js';
-import type { AiExecution } from '../db/types.js';
+import * as C from '../config/constants.js';
+import type { AiExecution } from '../db/documents.js';
 import type { SemanticBlock } from '../html/blocks.js';
-export interface ReviewSample {
+import { lexicalUnits } from '../html/units.js';
+import { WorkError } from '../obs/errors.js';
+import type { ArticleLanguageFacts, LanguageDetector } from './index.js';
+import { languageCodeSchema } from './contracts.js';
+import type { LanguageDiagnostic } from './contracts.js';
+
+interface Sample {
   id: string;
   text: string;
   weight: number;
 }
-import * as C from '../config/constants.js';
-import { lexicalUnits } from '../html/units.js';
-import { WorkError } from '../obs/errors.js';
-import { languageCodeSchema } from './contracts.js';
-const unknown = {
+export interface LanguageEvidence {
+  facts: ArticleLanguageFacts;
+  samples: Sample[];
+}
+const unknown: ArticleLanguageFacts = {
   primaryLanguage: null,
   languageConfidence: null,
 };
@@ -26,15 +31,16 @@ const responseSchema = z
       .max(C.LANGUAGE_REVIEW_MAX_SAMPLES),
   })
   .strict();
+
 /** Spread selection over the entire article instead of only its introduction. */
 function spread<T>(values: T[], limit: number): T[] {
   if (values.length <= limit) return values;
   return Array.from(
     { length: limit },
-    (_, i) => values[Math.round((i * (values.length - 1)) / (limit - 1))],
+    (_, i) => values[Math.round((i * (values.length - 1)) / (limit - 1))]!,
   );
 }
-function windows(text: string) {
+function windows(text: string): string[] {
   const bytes = Buffer.from(text),
     cap = C.LANGUAGE_REVIEW_SAMPLE_BYTES;
   if (bytes.length <= cap) return [text];
@@ -45,12 +51,12 @@ function windows(text: string) {
   return starts.map((offset) => {
     let start = offset,
       end = Math.min(offset + cap, bytes.length);
-    while ((bytes[start] & 0xc0) === 0x80) start++;
-    while (end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
+    while ((bytes[start]! & 0xc0) === 0x80) start++;
+    while (end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
     return bytes.subarray(start, end).toString('utf8').trim();
   });
 }
-function samplesFor(text: string, title: boolean) {
+function samplesFor(text: string, title: boolean): Omit<Sample, 'id'>[] {
   const units = lexicalUnits(text);
   if (!units.count) return [];
   const samples = windows(units.cleaned)
@@ -73,7 +79,7 @@ function samplesFor(text: string, title: boolean) {
 export function reviewSamples(
   title: string,
   blocks: SemanticBlock[],
-): ReviewSample[] {
+): Sample[] {
   const titleSamples = samplesFor(title, true);
   const bodySamples = spread(
     blocks.flatMap((block) => samplesFor(block.text, false)),
@@ -84,10 +90,11 @@ export function reviewSamples(
     id: `p${i}`,
   }));
 }
+
 function reviewedFacts(
   raw: unknown,
-  samples: ReviewSample[],
-): LanguageFacts | null {
+  samples: Sample[],
+): ArticleLanguageFacts | null {
   const response = responseSchema.safeParse(raw);
   if (!response.success) return null;
   const labels = new Map(response.data.parts.map(({ id, code }) => [id, code]));
@@ -116,7 +123,10 @@ function reviewedFacts(
       }
     : unknown;
 }
-function reviewFailure(error: unknown, budget: AbortSignal) {
+function reviewFailure(
+  error: unknown,
+  budget: AbortSignal,
+): LanguageDiagnostic['reason'] {
   if (
     budget.aborted ||
     (error instanceof WorkError && error.detail.failure_class === 'timeout')
@@ -131,24 +141,18 @@ function reviewFailure(error: unknown, budget: AbortSignal) {
     return 'invalid_response';
   return 'provider_error';
 }
+
 /** Owns local-first policy, the strict model contract, and safe degradation. */
 export class LanguageAnalyzer {
-  local;
-  ai;
-  observe;
   constructor(
-    local: LanguageDetector,
-    ai: AiClient,
-    observe: (
-      entryId: number,
-      diagnostic: LanguageDiagnostic,
+    private readonly local: LanguageDetector,
+    private readonly ai: AiClient,
+    private readonly observe: (
+      id: number,
+      result: LanguageDiagnostic,
     ) => void = () => {},
-  ) {
-    this.local = local;
-    this.ai = ai;
-    this.observe = observe;
-  }
-  prepare(title: string, blocks: SemanticBlock[]) {
+  ) {}
+  prepare(title: string, blocks: SemanticBlock[]): LanguageEvidence {
     const facts = this.local.analyze(title, blocks);
     return {
       facts,
@@ -156,16 +160,16 @@ export class LanguageAnalyzer {
     };
   }
   async resolve(
-    evidence: ReturnType<LanguageAnalyzer['prepare']>,
+    evidence: LanguageEvidence,
     snapshot: AiExecution,
     entryId: number,
     signal: AbortSignal,
     budget: AbortSignal,
-  ) {
+  ): Promise<ArticleLanguageFacts> {
     signal.throwIfAborted();
     const start = performance.now();
     const finish = (
-      facts: LanguageFacts,
+      facts: ArticleLanguageFacts,
       source: LanguageDiagnostic['source'],
       outcome: LanguageDiagnostic['outcome'],
       reason: LanguageDiagnostic['reason'],

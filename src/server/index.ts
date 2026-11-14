@@ -5,15 +5,6 @@ import {
   timingSafeEqual,
 } from 'node:crypto';
 import Fastify from 'fastify';
-import type { Service } from '../runtime/service.js';
-interface DigestParams {
-  job_id: string;
-  category_id?: string;
-  date: string;
-}
-interface IdParams {
-  id: string;
-}
 import { AdminSessions } from '../admin/session.js';
 import { registerConsole } from '../admin/assets.js';
 import { dashboard, listEntries } from '../admin/queries.js';
@@ -28,14 +19,17 @@ import {
   validDate,
 } from '../config/primitives.js';
 import { evaluateScope } from '../config/scope.js';
+import type { ScopeEntry } from '../config/scope.js';
 import {
   backfillPayloadSchema,
   emptyBackfillProgress,
   featureKind,
 } from '../db/documents.js';
 import { provisioningAtom } from '../features/digest/render.js';
+import type { Service } from '../runtime/service.js';
 import { ApiError, WorkError } from '../obs/errors.js';
-export function equalSecret(a: string, b: string) {
+
+export function equalSecret(a: string, b: string): boolean {
   return timingSafeEqual(
     createHash('sha256').update(a).digest(),
     createHash('sha256').update(b).digest(),
@@ -45,7 +39,7 @@ export function validSignature(
   body: Buffer,
   supplied: unknown,
   secret: string,
-) {
+): boolean {
   if (typeof supplied !== 'string' || !/^[a-fA-F0-9]{64}$/.test(supplied))
     return false;
   return timingSafeEqual(
@@ -115,7 +109,7 @@ function json(body: unknown): unknown {
     throw new ApiError(400, 'invalid_json');
   }
 }
-function pathId(value: unknown) {
+function pathId(value: unknown): number {
   if (
     typeof value !== 'string' ||
     !/^[1-9]\d*$/.test(value) ||
@@ -195,8 +189,10 @@ export function buildServer(service: Service) {
         return reply.code(503).send({ code: 'webhook_admission_failed' });
       }
     });
-  const partition = (params: DigestParams) => {
-    if (!DIGEST_JOB_ID_PATTERN.test(params.job_id))
+  const partition = (
+    params: Record<string, string>,
+  ): { job: string; key: string } => {
+    if (!DIGEST_JOB_ID_PATTERN.test(params.job_id!))
       throw new ApiError(404, 'not_found');
     let key = 'all';
     if (params.category_id) {
@@ -206,43 +202,49 @@ export function buildServer(service: Service) {
         throw new ApiError(404, 'not_found');
       }
     }
-    return { job: params.job_id, key };
+    return { job: params.job_id!, key };
   };
   for (const path of [
     '/digest/feeds/:job_id.xml',
     '/digest/feeds/:job_id/categories/:category_id.xml',
   ])
-    app.get<{ Params: DigestParams }>(path, async (request, reply) => {
-      const p = partition(request.params),
-        feed = service.digestRepository.feed(p.job, p.key);
-      if (!feed) return reply.code(404).send({ code: 'not_found' });
-      return reply
-        .type('application/atom+xml; charset=utf-8')
-        .send(provisioningAtom(feed));
-    });
+    app.get<{ Params: Record<string, string> }>(
+      path,
+      async (request, reply) => {
+        const p = partition(request.params),
+          feed = service.digestRepository.feed(p.job, p.key);
+        if (!feed) return reply.code(404).send({ code: 'not_found' });
+        return reply
+          .type('application/atom+xml; charset=utf-8')
+          .send(provisioningAtom(feed));
+      },
+    );
   for (const path of [
     '/digest/:job_id/:date',
     '/digest/:job_id/categories/:category_id/:date',
   ])
-    app.get<{ Params: DigestParams }>(path, async (request, reply) => {
-      const p = partition(request.params);
-      if (!validDate(request.params.date))
-        return reply.code(404).send({ code: 'not_found' });
-      const target = service.digestRepository.resolveDigestPermalink(
-        p.job,
-        p.key,
-        request.params.date,
-      );
-      if (!target) return reply.code(404).send({ code: 'not_found' });
-      return reply
-        .code(302)
-        .header('Cache-Control', 'no-store')
-        .header(
-          'Location',
-          `${service.config.miniflux.web_url ?? service.config.miniflux.base_url}/feed/${target.outputFeedId}/entry/${target.minifluxEntryId}`,
-        )
-        .send();
-    });
+    app.get<{ Params: Record<string, string> }>(
+      path,
+      async (request, reply) => {
+        const p = partition(request.params);
+        if (!validDate(request.params.date!))
+          return reply.code(404).send({ code: 'not_found' });
+        const target = service.digestRepository.resolveDigestPermalink(
+          p.job,
+          p.key,
+          request.params.date!,
+        );
+        if (!target) return reply.code(404).send({ code: 'not_found' });
+        return reply
+          .code(302)
+          .header('Cache-Control', 'no-store')
+          .header(
+            'Location',
+            `${service.config.miniflux.web_url ?? service.config.miniflux.base_url}/feed/${target.outputFeedId}/entry/${target.minifluxEntryId}`,
+          )
+          .send();
+      },
+    );
   if (service.config.server.admin_token) {
     registerConsole(app);
     const sessions = new AdminSessions(service);
@@ -332,43 +334,46 @@ export function buildServer(service: Service) {
               .parse(json(request.body)).base_url,
           ),
         );
-        admin.get<{ Params: IdParams }>('/entries/:id', async (request) => {
-          const id = pathId(request.params.id),
-            entry = service.repository.entry(id);
-          if (!entry) throw new ApiError(404, 'entry_not_found');
-          const source = await service.source.load(id);
-          let renderStatus = 'current';
-          if (entry.render_generation === 0) renderStatus = 'never_requested';
-          else if (entry.render_generation > entry.rendered_generation)
-            renderStatus = 'pending';
-          return httpDates({
-            ...entry,
-            feature_states: service.repository.featureStates(id),
-            render_status: renderStatus,
-            source,
-            artifacts: service.repository.artifacts(id),
-            tasks: service.repository
-              .listTasks({ entry_id: id })
-              .map((t) => service.repository.safeTask(t)),
-          });
-        });
-        admin.post<{ Params: IdParams }>(
-          '/entries/:id/reprocess',
-          async (request, reply) => {
-            const query = z
-              .object({ features: z.string().optional() })
-              .strict()
-              .parse(request.query);
-            const features = featureSelection.parse(
-              (query.features ?? 'translation,summary').split(','),
-            );
-            const outcomes = await service.reprocess(
-              pathId(request.params.id),
-              features,
-            );
-            return reply.code(202).send({ outcomes });
+        admin.get<{ Params: { id: string } }>(
+          '/entries/:id',
+          async (request) => {
+            const id = pathId(request.params.id),
+              entry = service.repository.entry(id);
+            if (!entry) throw new ApiError(404, 'entry_not_found');
+            const source = await service.source.load(id);
+            let renderStatus = 'current';
+            if (entry.render_generation === 0) renderStatus = 'never_requested';
+            else if (entry.render_generation > entry.rendered_generation)
+              renderStatus = 'pending';
+            return httpDates({
+              ...entry,
+              feature_states: service.repository.featureStates(id),
+              render_status: renderStatus,
+              source,
+              artifacts: service.repository.artifacts(id),
+              tasks: service.repository
+                .listTasks({ entry_id: id })
+                .map((t) => service.repository.safeTask(t)),
+            });
           },
         );
+        admin.post<{
+          Params: { id: string };
+          Querystring: { features?: string };
+        }>('/entries/:id/reprocess', async (request, reply) => {
+          const query = z
+            .object({ features: z.string().optional() })
+            .strict()
+            .parse(request.query);
+          const features = featureSelection.parse(
+            (query.features ?? 'translation,summary').split(','),
+          );
+          const outcomes = await service.reprocess(
+            pathId(request.params.id),
+            features,
+          );
+          return reply.code(202).send({ outcomes });
+        });
         admin.get('/tasks', async (request) => {
           const filter = z
             .object({
@@ -393,7 +398,7 @@ export function buildServer(service: Service) {
               .map((t) => service.repository.safeTask(t)),
           });
         });
-        admin.post<{ Params: IdParams }>(
+        admin.post<{ Params: { id: string } }>(
           '/tasks/:id/requeue',
           async (request) =>
             httpDates(
@@ -406,7 +411,7 @@ export function buildServer(service: Service) {
           const input = backfillRequest.parse(json(request.body));
           service.binding.requireOpen();
           if (!input.dry_run) service.admission.requireEnabled(input.features);
-          let since, until;
+          let since: number | null, until: number | null;
           try {
             since =
               input.since === undefined ? null : parseInstant(input.since);
@@ -437,21 +442,24 @@ export function buildServer(service: Service) {
           );
           return reply.code(202).send({ id: task.id });
         });
-        admin.get<{ Params: IdParams }>('/backfill/:id', async (request) => {
-          const task = service.repository.task(pathId(request.params.id));
-          if (task?.type !== 'ingest_backfill')
-            throw new ApiError(404, 'task_not_found');
-          const payload = backfillPayloadSchema.parse(task.payload);
-          return httpDates({
-            id: task.id,
-            state: task.state,
-            attempts: task.attempts,
-            dry_run: payload.dry_run,
-            requested_features: payload.requested_features,
-            progress: task.progress,
-            last_error: task.last_error,
-          });
-        });
+        admin.get<{ Params: { id: string } }>(
+          '/backfill/:id',
+          async (request) => {
+            const task = service.repository.task(pathId(request.params.id));
+            if (task?.type !== 'ingest_backfill')
+              throw new ApiError(404, 'task_not_found');
+            const payload = backfillPayloadSchema.parse(task.payload);
+            return httpDates({
+              id: task.id,
+              state: task.state,
+              attempts: task.attempts,
+              dry_run: payload.dry_run,
+              requested_features: payload.requested_features,
+              progress: task.progress,
+              last_error: task.last_error,
+            });
+          },
+        );
         admin.post('/summaries/run', async (_request, reply) =>
           reply.code(202).send({ enqueued: await service.summaries() }),
         );
@@ -546,7 +554,7 @@ export function buildServer(service: Service) {
                 (v.feature === 'digest') === (v.job_id !== undefined),
             )
             .parse(json(request.body));
-          const entry =
+          const entry: ScopeEntry | undefined =
             input.sample ?? service.repository.entry(input.entry_id!);
           if (!entry) throw new ApiError(404, 'entry_not_found');
           const scope =

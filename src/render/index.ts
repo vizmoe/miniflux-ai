@@ -1,8 +1,3 @@
-import type { Repository } from '../db/repository.js';
-import type { MinifluxClient } from '../miniflux/client.js';
-import type { MinifluxSourceReader } from '../source/index.js';
-import type { EntryLock } from '../runtime/concurrency.js';
-import type { Task, LastError } from '../db/types.js';
 import { isDeepStrictEqual } from 'node:util';
 import { BlockPlanMismatch, compose } from '../html/composition.js';
 import {
@@ -15,37 +10,30 @@ import {
 } from '../html/ownership.js';
 import { parseSource } from '../html/dom.js';
 import { renderPayloadSchema } from '../db/documents.js';
+import type { LastError } from '../db/documents.js';
+import type { Repository, Task } from '../db/repository.js';
+import type { SourceReader } from '../source/index.js';
 import { assertSourceCurrent } from '../source/index.js';
+import type { MinifluxClient } from '../miniflux/client.js';
+import type { EntryLock } from '../runtime/concurrency.js';
 import { WorkError } from '../obs/errors.js';
+
 export class Renderer {
-  repository;
-  source;
-  client;
-  lock;
-  version;
-  rendered;
   constructor(
-    repository: Repository,
-    source: MinifluxSourceReader,
-    client: MinifluxClient,
-    lock: EntryLock,
-    version: () => string,
-    rendered = () => {},
-  ) {
-    this.repository = repository;
-    this.source = source;
-    this.client = client;
-    this.lock = lock;
-    this.version = version;
-    this.rendered = rendered;
-  }
-  fail(stage: NonNullable<LastError['integrity_stage']>): never {
+    private readonly repository: Repository,
+    private readonly source: SourceReader,
+    private readonly client: Pick<MinifluxClient, 'updateEntry'>,
+    private readonly lock: EntryLock,
+    private readonly version: () => string,
+    private readonly rendered: () => void = () => {},
+  ) {}
+  private fail(stage: LastError['integrity_stage']): never {
     throw new WorkError('render_integrity_failed', 'integrity', false, 0, {
       miniflux_version: this.version(),
       integrity_stage: stage,
     });
   }
-  verify(stage: NonNullable<LastError['integrity_stage']>, check: () => void) {
+  private verify(stage: LastError['integrity_stage'], check: () => void): void {
     try {
       check();
     } catch (error) {
@@ -57,16 +45,16 @@ export class Renderer {
       this.fail(stage);
     }
   }
-  async run(task: Task<'render'>, signal: AbortSignal) {
+  async run(task: Task, signal: AbortSignal): Promise<void> {
     const generation = renderPayloadSchema.parse(
       task.payload,
     ).render_generation;
     await this.lock.with(
-      task.entry_id,
+      task.entry_id!,
       async () => {
         this.repository.assertOwner(task);
         signal.throwIfAborted();
-        const entry = this.repository.entry(task.entry_id);
+        const entry = this.repository.entry(task.entry_id!);
         if (!entry) throw new WorkError('entry_not_found', 'not_found', false);
         if (generation > entry.render_generation)
           throw new WorkError('invalid_render_generation', 'validation', false);
@@ -81,7 +69,7 @@ export class Renderer {
           ownership = this.repository.artifacts(entry.entry_id);
         const source = await this.source.load(entry.entry_id, signal);
         assertSourceCurrent(entry.source_fingerprint, source);
-        let proposal;
+        let proposal: ReturnType<typeof compose>;
         try {
           proposal = compose(source, current);
         } catch (error) {

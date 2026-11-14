@@ -1,7 +1,5 @@
 export class ConfigurationError extends Error {
-  paths;
-  constructor(paths: string[]) {
+  constructor(public readonly paths: string[]) {
     super(`Invalid configuration: ${paths.join(', ')}`);
-    this.paths = paths;
   }
 }

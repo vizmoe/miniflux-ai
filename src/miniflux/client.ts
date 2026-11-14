@@ -1,9 +1,9 @@
 import { z } from 'zod';
 import type { Config } from '../config/index.js';
-import type { LastError } from '../db/types.js';
 import { nonempty, safeId } from '../config/primitives.js';
 import { RequestLimiter } from '../runtime/concurrency.js';
 import { WorkError, upstreamRequestId } from '../obs/errors.js';
+
 const categorySchema = z.object({ id: safeId, title: nonempty });
 export const feedSchema = z.object({
   id: safeId,
@@ -12,15 +12,16 @@ export const feedSchema = z.object({
   site_url: z.string().default(''),
   category: categorySchema,
 });
+export type Feed = z.infer<typeof feedSchema>;
 const entrySchema = z.object({
   id: safeId,
   feed_id: safeId,
   title: z.string(),
   content: z.string(),
 });
-export type MinifluxEntry = z.infer<typeof entrySchema>;
-export type MinifluxFeed = z.infer<typeof feedSchema>;
-export function retryAfter(value: string | null, now = Date.now()) {
+export type StoredEntry = z.infer<typeof entrySchema>;
+export type Fetch = typeof globalThis.fetch;
+export function retryAfter(value: string | null, now = Date.now()): number {
   if (!value) return 0;
   if (/^\d+(?:\.\d+)?$/.test(value))
     return Math.min(Number(value) * 1000, Number.MAX_SAFE_INTEGER - now);
@@ -30,7 +31,7 @@ export function retryAfter(value: string | null, now = Date.now()) {
 function failureKind(
   status: number,
   body: unknown,
-): [string, LastError['failure_class']] {
+): [string, WorkError['detail']['failure_class']] {
   if (
     status === 400 &&
     body !== null &&
@@ -53,7 +54,7 @@ function responseBody(
   raw: string,
   statuses: number[],
 ): unknown {
-  let body;
+  let body: unknown;
   try {
     body = JSON.parse(raw);
   } catch {
@@ -84,24 +85,21 @@ function responseBody(
   return body;
 }
 export class MinifluxClient {
-  config;
-  fetcher;
-  observe;
-  limiter;
+  private readonly limiter: RequestLimiter;
   constructor(
-    config: Config['miniflux'],
-    fetcher = fetch,
-    observe: (endpoint: string, status: string) => void = () => {},
+    private readonly config: Config['miniflux'],
+    private readonly fetcher: Fetch = fetch,
+    private readonly observe: (
+      endpoint: string,
+      status: string,
+    ) => void = () => {},
   ) {
-    this.config = config;
-    this.fetcher = fetcher;
-    this.observe = observe;
     this.limiter = new RequestLimiter(
       config.max_concurrent_requests,
       config.max_requests_per_second,
     );
   }
-  async request(
+  private async request(
     method: string,
     path: string,
     statuses: number[],
@@ -112,7 +110,7 @@ export class MinifluxClient {
       signal?.throwIfAborted();
       const timeout = AbortSignal.timeout(this.config.request_timeout_ms);
       const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
-      const endpoint = path.split('?')[0].replace(/\/\d+(?=\/|$)/g, '/:id');
+      const endpoint = path.split('?')[0]!.replace(/\/\d+(?=\/|$)/g, '/:id');
       let status = 'network';
       try {
         const response = await this.fetcher(`${this.config.base_url}${path}`, {
@@ -141,7 +139,7 @@ export class MinifluxClient {
       }
     }, signal);
   }
-  decode<T>(schema: z.ZodType<T>, value: unknown): T {
+  private decode<T>(schema: z.ZodType<T, unknown>, value: unknown): T {
     const result = schema.safeParse(value);
     if (!result.success)
       throw new WorkError(
@@ -151,7 +149,7 @@ export class MinifluxClient {
       );
     return result.data;
   }
-  async version(signal?: AbortSignal) {
+  async version(signal?: AbortSignal): Promise<string> {
     const raw = this.decode(
       z.object({ version: z.string() }),
       await this.request('GET', '/v1/version', [200], undefined, signal),
@@ -164,16 +162,16 @@ export class MinifluxClient {
       );
     return raw;
   }
-  async me(signal?: AbortSignal) {
+  async me(signal?: AbortSignal): Promise<number> {
     return this.decode(
       z.object({ id: safeId }),
       await this.request('GET', '/v1/me', [200], undefined, signal),
     ).id;
   }
   async entries(
-    query: Record<string, string | number | boolean>,
+    query: Record<string, string | number>,
     signal?: AbortSignal,
-  ) {
+  ): Promise<unknown[]> {
     const params = new URLSearchParams(
       Object.entries(query).map(([k, v]) => [k, String(v)]),
     );
@@ -188,7 +186,7 @@ export class MinifluxClient {
       ),
     ).entries;
   }
-  async getEntry(id: number, signal?: AbortSignal) {
+  async getEntry(id: number, signal?: AbortSignal): Promise<StoredEntry> {
     safeId.parse(id);
     const result = this.decode(
       entrySchema,
@@ -206,7 +204,7 @@ export class MinifluxClient {
     id: number,
     value: { title: string; content: string },
     signal?: AbortSignal,
-  ) {
+  ): Promise<StoredEntry> {
     safeId.parse(id);
     // Miniflux rejects explicit empty fields; omitted fields retain their
     // stored value. The Renderer still validates the complete returned Entry.
@@ -226,7 +224,7 @@ export class MinifluxClient {
       );
     return result;
   }
-  async feed(id: number, signal?: AbortSignal) {
+  async feed(id: number, signal?: AbortSignal): Promise<Feed> {
     safeId.parse(id);
     const result = this.decode(
       feedSchema,
@@ -240,7 +238,7 @@ export class MinifluxClient {
       );
     return result;
   }
-  async feeds(signal?: AbortSignal) {
+  async feeds(signal?: AbortSignal): Promise<Feed[]> {
     return this.decode(
       z.array(feedSchema),
       await this.request('GET', '/v1/feeds', [200], undefined, signal),
@@ -256,7 +254,7 @@ export class MinifluxClient {
     url: string,
     categoryId: number | null,
     signal?: AbortSignal,
-  ) {
+  ): Promise<Feed> {
     const result = this.decode(
       z.object({ feed_id: safeId }),
       await this.request(
@@ -274,9 +272,17 @@ export class MinifluxClient {
   }
   async importEntry(
     feedId: number,
-    data: Record<string, unknown>,
+    data: {
+      url: string;
+      external_id: string;
+      title: string;
+      content: string;
+      published_at: number;
+      status: string;
+      starred: boolean;
+    },
     signal?: AbortSignal,
-  ) {
+  ): Promise<number> {
     safeId.parse(feedId);
     const response = await this.request(
       'POST',

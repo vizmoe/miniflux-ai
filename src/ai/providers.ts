@@ -1,17 +1,17 @@
-import type { AiConfig, Provider } from '../config/index.js';
-interface ProviderState {
+import { createHash } from 'node:crypto';
+import type { AiConfiguration, AiProvider } from '../config/index.js';
+import { durationMs } from '../config/primitives.js';
+import { WorkError } from '../obs/errors.js';
+
+type Health = {
   fingerprint: string;
   failures: number;
   retryAt: number | null;
   probe: Promise<void> | null;
   epoch: number;
   lastFailure: string | null;
-}
-export type ProviderHealth = ReturnType<ProviderPool['health']>[number];
-import { createHash } from 'node:crypto';
-import { durationMs } from '../config/primitives.js';
-import { WorkError } from '../obs/errors.js';
-const fingerprint = (p: Provider) =>
+};
+const fingerprint = (p: AiProvider) =>
   createHash('sha256')
     .update(
       JSON.stringify([
@@ -23,6 +23,7 @@ const fingerprint = (p: Provider) =>
       ]),
     )
     .digest('hex');
+
 async function waitForRecovery(probes: Promise<void>[], signal: AbortSignal) {
   signal.throwIfAborted();
   let onAbort = () => {};
@@ -36,17 +37,16 @@ async function waitForRecovery(probes: Promise<void>[], signal: AbortSignal) {
     signal.removeEventListener('abort', onAbort);
   }
 }
+
 /** One shared circuit per configured service, across every Feature and language review. */
 export class ProviderPool {
-  configuration;
-  now;
-  states = new Map<string, ProviderState>();
-  constructor(configuration: () => AiConfig, now = Date.now) {
-    this.configuration = configuration;
-    this.now = now;
-  }
-  current() {
-    let config;
+  private readonly states = new Map<string, Health>();
+  constructor(
+    private readonly configuration: () => AiConfiguration,
+    private readonly now = Date.now,
+  ) {}
+  private current(): AiConfiguration {
+    let config: AiConfiguration;
     try {
       config = structuredClone(this.configuration());
     } catch {
@@ -69,11 +69,13 @@ export class ProviderPool {
     }
     return config;
   }
-  healthState(provider: Provider, health: ProviderState) {
-    if (!provider.enabled) return 'disabled';
-    if (health.probe) return 'probing';
-    if (health.retryAt === null) return 'healthy';
-    return health.retryAt > this.now() ? 'cooling' : 'recovering';
+  private healthState(provider: AiProvider, health: Health) {
+    if (!provider.enabled) return 'disabled' as const;
+    if (health.probe) return 'probing' as const;
+    if (health.retryAt === null) return 'healthy' as const;
+    return health.retryAt > this.now()
+      ? ('cooling' as const)
+      : ('recovering' as const);
   }
   health() {
     return this.current().providers.map((p) => {
@@ -87,11 +89,11 @@ export class ProviderPool {
       };
     });
   }
-  available(
-    provider: Provider,
+  private available(
+    provider: AiProvider,
     attempted: Set<string>,
     probes: Promise<void>[],
-  ) {
+  ): Health | undefined {
     if (attempted.has(provider.id)) return;
     const h = this.states.get(provider.id);
     // Calls keep their route snapshot, but may not modify an edited provider's circuit.
@@ -103,14 +105,14 @@ export class ProviderPool {
     if (h.retryAt !== null && h.retryAt > this.now()) return;
     return h;
   }
-  recordFailure(
-    provider: Provider,
-    h: ProviderState,
+  private recordFailure(
+    provider: AiProvider,
+    h: Health,
     epoch: number,
     probe: boolean,
-    config: AiConfig,
+    config: AiConfiguration,
     error: WorkError,
-  ) {
+  ): void {
     if (this.states.get(provider.id) !== h) return;
     if (h.epoch !== epoch) {
       // A late failure may extend Retry-After, but cannot revive a cooled circuit.
@@ -131,11 +133,11 @@ export class ProviderPool {
       h.epoch++;
     }
   }
-  async runAttempt<T>(
-    provider: Provider,
-    h: ProviderState,
-    config: AiConfig,
-    attempt: (provider: Provider) => Promise<T>,
+  private async runAttempt<T>(
+    provider: AiProvider,
+    h: Health,
+    config: AiConfiguration,
+    attempt: (provider: AiProvider) => Promise<T>,
     signal: AbortSignal,
   ): Promise<{ ok: true; value: T } | { ok: false; error: WorkError }> {
     const probe = h.retryAt !== null;
@@ -177,7 +179,7 @@ export class ProviderPool {
     }
   }
   async run<T>(
-    attempt: (provider: Provider) => Promise<T>,
+    attempt: (provider: AiProvider) => Promise<T>,
     signal: AbortSignal,
   ): Promise<T> {
     signal.throwIfAborted();
@@ -187,7 +189,7 @@ export class ProviderPool {
       .sort((a, b) => b.priority - a.priority);
     if (!providers.length)
       throw new WorkError('ai_not_configured', 'auth', false);
-    const errors = [];
+    const errors: WorkError[] = [];
     const attempted = new Set<string>();
     for (;;) {
       const probes: Promise<void>[] = [];
@@ -213,9 +215,9 @@ export class ProviderPool {
     }
     return this.unavailable(providers, errors);
   }
-  unavailable(providers: Provider[], errors: WorkError[]): never {
+  private unavailable(providers: AiProvider[], errors: WorkError[]): never {
     const waits = providers.map((p) => {
-      const h = this.states.get(p.id)!;
+      const h = this.states.get(p.id);
       return Math.max(0, (h?.retryAt ?? 0) - this.now());
     });
     const wait = Math.min(...waits);

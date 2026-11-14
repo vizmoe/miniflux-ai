@@ -9,6 +9,7 @@ import {
   text,
   uniqueIndex,
 } from 'drizzle-orm/sqlite-core';
+
 const times = () => ({
   created_at: integer().notNull(),
   updated_at: integer().notNull(),
@@ -329,3 +330,7 @@ export const serviceState = sqliteTable(
     ),
   ],
 );
+
+export type Entry = typeof entries.$inferSelect;
+export type FeatureState = typeof featureStates.$inferSelect;
+export type FeedRecord = typeof digestFeeds.$inferSelect;

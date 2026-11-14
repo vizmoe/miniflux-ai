@@ -1,25 +1,26 @@
 import { eld } from 'eld';
+import * as C from '../config/constants.js';
+import { lexicalUnits, isUsableSourceTitle } from '../html/units.js';
 import type { SemanticBlock } from '../html/blocks.js';
-export interface LanguageFacts {
+
+export interface ArticleLanguageFacts {
   primaryLanguage: string | null;
   languageConfidence: number | null;
+}
+export interface Detector {
+  detect(text: string): { language: string; isReliable(): boolean };
 }
 export interface PartEvidence {
   language: string | null;
   reliable: boolean;
   weight: number;
 }
-export interface LocalDetector {
-  detect(text: string): { language: string; isReliable(): boolean };
-}
-import * as C from '../config/constants.js';
-import { lexicalUnits, isUsableSourceTitle } from '../html/units.js';
 function evidenceWeight(
   count: number,
   title: boolean,
   language: string | null,
   reliable: boolean,
-) {
+): number {
   if (language === null) return 0;
   const cap = title ? C.LANGUAGE_TITLE_WEIGHT_CAP : C.LANGUAGE_PART_MAX_WEIGHT;
   const lengthFactor =
@@ -32,13 +33,13 @@ function evidenceWeight(
 export function partEvidence(
   text: string,
   title: boolean,
-  detector: LocalDetector,
+  detector: Detector,
 ): PartEvidence {
   const u = lexicalUnits(text);
   if (u.count < C.LANGUAGE_PART_MIN_UNITS)
     return { language: null, reliable: false, weight: 0 };
   const result = detector.detect(u.cleaned);
-  let language = result.language || null,
+  let language: string | null = result.language || null,
     reliable = result.isReliable();
   const cjk = u.han_units + u.kana_units + u.hangul_units;
   const kana =
@@ -72,7 +73,7 @@ export function partEvidence(
   const weight = evidenceWeight(u.count, title, language, reliable);
   return { language, reliable, weight };
 }
-export function classifyParts(parts: PartEvidence[]): LanguageFacts {
+export function classifyParts(parts: PartEvidence[]): ArticleLanguageFacts {
   const aggregate = new Map<string, { weight: number; reliable: number }>();
   let total = 0;
   for (const part of parts)
@@ -93,11 +94,8 @@ export function classifyParts(parts: PartEvidence[]): LanguageFacts {
     : { primaryLanguage: null, languageConfidence: null };
 }
 export class LanguageDetector {
-  detector;
-  constructor(detector: LocalDetector) {
-    this.detector = detector;
-  }
-  static async create() {
+  constructor(private readonly detector: Detector) {}
+  static async create(): Promise<LanguageDetector> {
     // eld's root entry is dynamic; its shared declaration also covers static entries.
     const detector = eld.newInstance();
     if (!('load' in detector) || typeof detector.load !== 'function')
@@ -105,7 +103,7 @@ export class LanguageDetector {
     await detector.load(C.ELD_DATABASE);
     return new LanguageDetector(detector);
   }
-  analyze(title: string, blocks: SemanticBlock[]): LanguageFacts {
+  analyze(title: string, blocks: SemanticBlock[]): ArticleLanguageFacts {
     return classifyParts([
       ...(isUsableSourceTitle(title)
         ? [partEvidence(title, true, this.detector)]

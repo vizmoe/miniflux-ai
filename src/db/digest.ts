@@ -1,20 +1,3 @@
-import type { Repository } from './repository.js';
-import type {
-  DigestSnapshot,
-  DigestWindow,
-  DigestWindowRow,
-  DigestRun,
-  DigestRunRow,
-  DigestFeed,
-  Entry,
-  Task,
-  DigestStats,
-} from './types.js';
-export interface PartitionResult {
-  partition_key: string;
-  status: 'created' | 'existing' | 'empty';
-  run?: DigestRun;
-}
 import {
   canonicalJson,
   expandTemplate,
@@ -28,32 +11,48 @@ import {
   digestStatsSchema,
   zeroDigestStats,
 } from './documents.js';
+import type { DigestSnapshot, DigestStats } from './documents.js';
+import type { Entry, FeedRecord, digestRuns, digestWindows } from './schema.js';
+import type { Repository, Task } from './repository.js';
 import { ApiError } from '../obs/errors.js';
-export function feedPath(jobId: string, key: string) {
+
+export type DigestWindow = Omit<
+  typeof digestWindows.$inferSelect,
+  'config_snapshot'
+> & { config_snapshot: DigestSnapshot };
+export type DigestRun = Omit<typeof digestRuns.$inferSelect, 'ai_stats'> & {
+  ai_stats: DigestStats;
+};
+export type PartitionKey = 'all' | `category:${number}`;
+export function feedPath(jobId: string, key: string): string {
   return key === 'all'
     ? `/digest/feeds/${jobId}.xml`
     : `/digest/feeds/${jobId}/categories/${key.slice(9)}.xml`;
 }
-export function permalinkPath(jobId: string, key: string, date: string) {
+export function permalinkPath(
+  jobId: string,
+  key: string,
+  date: string,
+): string {
   return key === 'all'
     ? `/digest/${jobId}/${date}`
     : `/digest/${jobId}/categories/${key.slice(9)}/${date}`;
 }
 export function templateValues(
-  snapshot: Pick<DigestSnapshot, 'job_id'>,
+  snapshot: DigestSnapshot,
   key: string,
   title: string | null,
   date?: string,
-) {
+): Record<string, string> {
   return {
     job_id: snapshot.job_id,
     ...(date ? { date } : {}),
     ...(key !== 'all'
-      ? { category_key: key.slice(9), category_title: title }
+      ? { category_key: key.slice(9), category_title: title! }
       : {}),
   };
 }
-function validateTarget(snapshot: DigestSnapshot, target?: string) {
+function validateTarget(snapshot: DigestSnapshot, target?: string): void {
   if (
     target !== undefined &&
     (snapshot.output.partition_by === 'all'
@@ -63,8 +62,11 @@ function validateTarget(snapshot: DigestSnapshot, target?: string) {
   )
     throw new ApiError(400, 'invalid_partition_key');
 }
-function exclusionReason(snapshot: DigestSnapshot, entry: Entry) {
-  let reason = null;
+function exclusionReason(
+  snapshot: DigestSnapshot,
+  entry: Entry,
+): string | null {
+  let reason: string | null = null;
   if (evaluateScope(snapshot.scope, entry).action === 'deny')
     reason = 'scope_denied';
   else if (
@@ -83,20 +85,18 @@ function exclusionReason(snapshot: DigestSnapshot, entry: Entry) {
   return reason;
 }
 export class DigestRepository {
-  repository;
-  excluded;
   constructor(
-    repository: Repository,
-    excluded: (job: string, reason: string) => void = () => {},
-  ) {
-    this.repository = repository;
-    this.excluded = excluded;
-  }
+    readonly repository: Repository,
+    private readonly excluded: (
+      jobId: string,
+      reason: string,
+    ) => void = () => {},
+  ) {}
   get db() {
     return this.repository.db;
   }
   window(id: number): DigestWindow | undefined {
-    const row = this.db.get<DigestWindowRow>(
+    const row = this.db.get<typeof digestWindows.$inferSelect>(
       'SELECT * FROM digest_windows WHERE id=?',
       id,
     );
@@ -111,7 +111,7 @@ export class DigestRepository {
       throw new Error('invalid_digest_window');
     return { ...row, config_snapshot: snapshot };
   }
-  windows(limit = 100) {
+  windows(limit = 100): DigestWindow[] {
     return this.db
       .all<{ id: number }>(
         'SELECT id FROM digest_windows ORDER BY window_end DESC,id DESC LIMIT ?',
@@ -119,7 +119,7 @@ export class DigestRepository {
       )
       .map((r) => this.window(r.id)!);
   }
-  incompleteWindows() {
+  incompleteWindows(): DigestWindow[] {
     return this.db
       .all<{ id: number }>(
         'SELECT id FROM digest_windows WHERE last_evaluated_at IS NULL ORDER BY window_end,id',
@@ -127,7 +127,7 @@ export class DigestRepository {
       .map((r) => this.window(r.id)!);
   }
   run(id: number): DigestRun | undefined {
-    const row = this.db.get<DigestRunRow>(
+    const row = this.db.get<typeof digestRuns.$inferSelect>(
       'SELECT * FROM digest_runs WHERE id=?',
       id,
     );
@@ -135,7 +135,7 @@ export class DigestRepository {
       ? { ...row, ai_stats: digestStatsSchema.parse(JSON.parse(row.ai_stats)) }
       : undefined;
   }
-  runs(windowId: number) {
+  runs(windowId: number): DigestRun[] {
     return this.db
       .all<{ id: number }>(
         'SELECT id FROM digest_runs WHERE digest_window_id=? ORDER BY partition_key',
@@ -144,20 +144,20 @@ export class DigestRepository {
       .map((r) => this.run(r.id)!);
   }
   candidates(runId: number): Entry[] {
-    return this.db.all(
+    return this.db.all<Entry>(
       'SELECT e.* FROM digest_run_candidates c JOIN entries e ON e.entry_id=c.entry_id WHERE c.digest_run_id=? ORDER BY c.selection_position',
       runId,
     );
   }
-  feed(jobId: string, key: string): DigestFeed | undefined {
-    return this.db.get(
+  feed(jobId: string, key: string): FeedRecord | undefined {
+    return this.db.get<FeedRecord>(
       'SELECT * FROM digest_output_feeds WHERE job_id=? AND partition_key=?',
       jobId,
       key,
     );
   }
-  feeds(): DigestFeed[] {
-    return this.db.all(
+  feeds(): FeedRecord[] {
+    return this.db.all<FeedRecord>(
       'SELECT * FROM digest_output_feeds ORDER BY job_id,partition_key',
     );
   }
@@ -165,7 +165,7 @@ export class DigestRepository {
     snapshot: DigestSnapshot,
     key: string,
     categoryTitle: string | null,
-  ) {
+  ): FeedRecord {
     const existing = this.feed(snapshot.job_id, key);
     if (existing) return existing;
     const categoryId =
@@ -194,14 +194,14 @@ export class DigestRepository {
       this.repository.now(),
       this.repository.now(),
     );
-    return this.feed(snapshot.job_id, key);
+    return this.feed(snapshot.job_id, key)!;
   }
   claimWindow(
     snapshot: DigestSnapshot,
     end: number,
     lookbackMs: number,
-    trigger: 'manual' | 'scheduled',
-  ) {
+    trigger: 'scheduled' | 'manual',
+  ): { window: DigestWindow; created: boolean } {
     return this.db.transaction(() => {
       digestSnapshotSchema.parse(snapshot);
       const exact = this.db.get<{ id: number }>(
@@ -232,11 +232,11 @@ export class DigestRepository {
       return { window: this.window(Number(id))!, created: true };
     });
   }
-  candidateGroups(
+  private candidateGroups(
     window: DigestWindow,
     existing: Map<string, DigestRun>,
     target?: string,
-  ) {
+  ): Map<string, Entry[]> {
     const snapshot = window.config_snapshot;
     const groups = new Map<string, Entry[]>(),
       outputs = this.repository.outputFeedIds();
@@ -256,7 +256,7 @@ export class DigestRepository {
         continue;
       const reason = exclusionReason(snapshot, entry);
       if (reason) {
-        this.db.afterCommit(() => this.excluded(snapshot.job_id, reason));
+        this.db.afterCommit(() => this.excluded(snapshot.job_id, reason!));
         continue;
       }
       const group = groups.get(key) ?? [];
@@ -265,7 +265,14 @@ export class DigestRepository {
     }
     return groups;
   }
-  select(windowId: number, target?: string) {
+  select(
+    windowId: number,
+    target?: string,
+  ): Array<{
+    partition_key: string;
+    status: 'created' | 'existing' | 'empty';
+    run?: DigestRun;
+  }> {
     return this.db.transaction(() => {
       const window = this.window(windowId);
       if (!window) throw new Error('digest_window_not_found');
@@ -274,16 +281,20 @@ export class DigestRepository {
       const existing = new Map(
         this.runs(window.id).map((r) => [r.partition_key, r]),
       );
-      const results: PartitionResult[] = [...existing.values()]
+      const results: Array<{
+        partition_key: string;
+        status: 'created' | 'existing' | 'empty';
+        run?: DigestRun;
+      }> = [...existing.values()]
         .filter((r) => !target || r.partition_key === target)
         .map((r) => ({
           partition_key: r.partition_key,
-          status: 'existing' as const,
+          status: 'existing',
           run: r,
         }));
       const groups = this.candidateGroups(window, existing, target);
       for (const [key, eligible] of groups) {
-        const counts = new Map();
+        const counts = new Map<number, number>();
         const retained = eligible
           .filter((e) => {
             const count = counts.get(e.feed_id) ?? 0;
@@ -292,14 +303,14 @@ export class DigestRepository {
           })
           .slice(0, snapshot.selection.max_entries);
         if (!retained.length) continue;
-        const title = key === 'all' ? null : retained[0].source_category_title;
+        const title = key === 'all' ? null : retained[0]!.source_category_title;
         this.ensureFeed(snapshot, key, title);
         const id = Number(
           this.db.run(
             'INSERT INTO digest_runs(digest_window_id,partition_key,source_category_id,source_category_title,state,external_id,dropped_count,ai_stats,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
             window.id,
             key,
-            key === 'all' ? null : retained[0].category_id,
+            key === 'all' ? null : retained[0]!.category_id,
             title,
             'pending',
             `mfai:digest:${snapshot.job_id}:${key}:${window.digest_date}`,
@@ -341,7 +352,7 @@ export class DigestRepository {
       return results;
     });
   }
-  continuationSnapshot(jobId: string, key: string) {
+  continuationSnapshot(jobId: string, key: string): DigestSnapshot | undefined {
     const row = this.db.get<{ id: number }>(
       "SELECT w.id FROM digest_windows w JOIN digest_runs r ON r.digest_window_id=w.id WHERE w.job_id=? AND r.partition_key=? AND r.state IN ('pending','running') ORDER BY w.window_end,r.id LIMIT 1",
       jobId,
@@ -352,11 +363,11 @@ export class DigestRepository {
   markFeed(
     jobId: string,
     key: string,
-    state: string,
+    state: 'ready' | 'degraded',
     reason: string | null,
     next: number | null,
     feed?: { id: number; categoryId: number },
-  ) {
+  ): void {
     this.db.transaction(() => {
       const previous = this.feed(jobId, key);
       if (!previous) throw new Error('feed_registry_missing');
@@ -380,7 +391,7 @@ export class DigestRepository {
       );
     });
   }
-  activate(capability: () => boolean) {
+  activate(capability: () => boolean): number {
     return this.db.transaction(() => {
       if (!capability()) return 0;
       const rows = this.db.all<{ id: number }>(
@@ -425,14 +436,14 @@ export class DigestRepository {
       return created;
     });
   }
-  taskForRun(runId: number) {
+  taskForRun(runId: number): Task | undefined {
     const row = this.db.get<{ id: number }>(
       "SELECT id FROM tasks WHERE type='digest' AND json_extract(payload,'$.digest_run_id')=? ORDER BY id DESC LIMIT 1",
       runId,
     );
     return row ? this.repository.task(row.id) : undefined;
   }
-  completeImport(task: Task<'digest'>, entryId: number, stats: DigestStats) {
+  completeImport(task: Task, entryId: number, stats: DigestStats): void {
     this.db.transaction(() => {
       this.repository.assertOwner(task);
       safeId.parse(entryId);
@@ -490,7 +501,11 @@ export class DigestRepository {
           : null,
     };
   }
-  resolveDigestPermalink(jobId: string, partition: string, date: string) {
+  resolveDigestPermalink(
+    jobId: string,
+    partition: string,
+    date: string,
+  ): { outputFeedId: number; minifluxEntryId: number } | null {
     if (!validDate(date)) return null;
     const row = this.db.get<{
       output_feed_id: number;

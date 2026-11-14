@@ -1,49 +1,42 @@
-import type { Repository } from '../db/repository.js';
-import type { Task, TaskType, TaskState } from '../db/types.js';
-import type { CallStat } from '../generation/types.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import type { Repository, Task } from '../db/repository.js';
+import type { TaskType } from '../db/documents.js';
+import { digestStats } from '../ai/stats.js';
+import type { CallStat } from '../ai/client.js';
+import { LeaseLost, safeWorkError, WorkError } from '../obs/errors.js';
+
 export interface TaskContext {
   signal: AbortSignal;
-  calls: CallStat[];
   assertOwned(): void;
-}
-type Handlers = {
-  [K in TaskType]: (task: Task<K>, context: TaskContext) => Promise<unknown>;
-};
-interface QueueOptions {
-  concurrency: number;
-  leaseMs: number;
-  gate(): boolean;
-  terminal(): void;
-  observe?(task: Task, state: TaskState, duration: number): void;
-}
-interface ActiveTask {
-  task: Task;
-  controller: AbortController;
   calls: CallStat[];
-  renew: NodeJS.Timeout;
-  promise: Promise<void>;
 }
-import { setTimeout as delay } from 'node:timers/promises';
-import { digestStats } from '../ai/stats.js';
-import { LeaseLost, safeWorkError, WorkError } from '../obs/errors.js';
+export type TaskHandler = (task: Task, context: TaskContext) => Promise<void>;
 export class Queue {
-  repository;
-  handlers;
-  options;
-  active = new Map<number, ActiveTask>();
-  claimTimer?: NodeJS.Timeout;
-  reaperTimer?: NodeJS.Timeout;
-  stopped = false;
+  private readonly active = new Map<
+    number,
+    {
+      task: Task;
+      controller: AbortController;
+      promise: Promise<void>;
+      renew: ReturnType<typeof setInterval>;
+      calls: CallStat[];
+    }
+  >();
+  private claimTimer?: ReturnType<typeof setInterval>;
+  private reaperTimer?: ReturnType<typeof setInterval>;
+  private stopped = false;
   constructor(
-    repository: Repository,
-    handlers: Handlers,
-    options: QueueOptions,
-  ) {
-    this.repository = repository;
-    this.handlers = handlers;
-    this.options = options;
-  }
-  start() {
+    private readonly repository: Repository,
+    private readonly handlers: Record<TaskType, TaskHandler>,
+    private readonly options: {
+      concurrency: number;
+      leaseMs: number;
+      gate: () => boolean;
+      terminal: () => void;
+      observe?: (task: Task, outcome: string, durationMs: number) => void;
+    },
+  ) {}
+  start(): void {
     this.stopped = false;
     this.claimTimer = setInterval(() => this.tick(), 100);
     this.reaperTimer = setInterval(
@@ -59,7 +52,7 @@ export class Queue {
     );
     this.tick();
   }
-  tick() {
+  tick(): void {
     if (this.stopped || !this.options.gate()) return;
     try {
       while (this.active.size < this.options.concurrency) {
@@ -95,7 +88,7 @@ export class Queue {
       /* a failed claim consumes no attempt; the transaction has rolled back */
     }
   }
-  dispatch(task: Task, context: TaskContext) {
+  private dispatch(task: Task, context: TaskContext): Promise<void> {
     switch (task.type) {
       case 'generate_artifacts':
         return this.handlers.generate_artifacts(task, context);
@@ -107,7 +100,11 @@ export class Queue {
         return this.handlers.ingest_backfill(task, context);
     }
   }
-  async execute(task: Task, controller: AbortController, calls: CallStat[]) {
+  private async execute(
+    task: Task,
+    controller: AbortController,
+    calls: CallStat[],
+  ): Promise<void> {
     const start = Date.now();
     try {
       await this.dispatch(task, {
@@ -140,10 +137,10 @@ export class Queue {
       }
     }
   }
-  async idle() {
+  async idle(): Promise<void> {
     await Promise.all([...this.active.values()].map((v) => v.promise));
   }
-  async stop(graceMs: number) {
+  async stop(graceMs: number): Promise<void> {
     this.stopped = true;
     if (this.claimTimer) clearInterval(this.claimTimer);
     if (this.reaperTimer) clearInterval(this.reaperTimer);

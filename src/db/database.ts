@@ -9,13 +9,14 @@ import {
   INSTANCE_LOCK_FILE,
   SQLITE_DATABASE_FILE,
 } from '../config/constants.js';
+
 /** Owns the kernel lock for its entire lifetime, including all migrations. */
 export class Database {
-  sqlite!: Sqlite.Database;
-  lockFd;
-  closed = false;
-  commitCallbacks: (() => void)[][] = [];
-  private statements = new Map<string, Sqlite.Statement<unknown[]>>();
+  readonly sqlite!: Sqlite.Database;
+  private readonly lockFd: number;
+  private closed = false;
+  private readonly commitCallbacks: Array<Array<() => void>> = [];
+  private readonly statements = new Map<string, Sqlite.Statement>();
   constructor(root = process.cwd()) {
     mkdirSync(resolve(root, 'data'), { recursive: true, mode: 0o700 });
     this.lockFd = openSync(resolve(root, INSTANCE_LOCK_FILE), 'a+', 0o600);
@@ -60,9 +61,9 @@ export class Database {
     }
   }
   transaction<T>(work: () => T): T {
-    const callbacks: (() => void)[] = [];
+    const callbacks: Array<() => void> = [];
     this.commitCallbacks.push(callbacks);
-    let result;
+    let result: T;
     try {
       result = this.sqlite.transaction(work).immediate();
     } catch (error) {
@@ -76,7 +77,7 @@ export class Database {
     return result;
   }
   /** Observability cannot report a rolled-back mutation or undo a commit. */
-  afterCommit(callback: () => void) {
+  afterCommit(callback: () => void): void {
     const pending = this.commitCallbacks.at(-1);
     if (pending) pending.push(callback);
     else {
@@ -87,25 +88,19 @@ export class Database {
       }
     }
   }
-  get<T extends object = Record<string, unknown>>(
-    sql: string,
-    ...params: unknown[]
-  ): T | undefined {
+  get<T>(sql: string, ...params: unknown[]): T | undefined {
     return this.statement(sql).get(...params) as T | undefined;
   }
-  all<T extends object = Record<string, unknown>>(
-    sql: string,
-    ...params: unknown[]
-  ): T[] {
+  all<T>(sql: string, ...params: unknown[]): T[] {
     return this.statement(sql).all(...params) as T[];
   }
-  run(sql: string, ...params: unknown[]) {
+  run(sql: string, ...params: unknown[]): Sqlite.RunResult {
     return this.statement(sql).run(...params);
   }
-  private statement(sql: string): Sqlite.Statement<unknown[]> {
+  private statement(sql: string): Sqlite.Statement {
     const cached = this.statements.get(sql);
     if (cached) return cached;
-    const statement = this.sqlite.prepare<unknown[]>(sql);
+    const statement = this.sqlite.prepare(sql);
     // SQL templates contain placeholders, never article bodies or credentials.
     // Bound the cache even when Admin filters create different query shapes.
     if (this.statements.size >= 128)
@@ -113,10 +108,10 @@ export class Database {
     this.statements.set(sql, statement);
     return statement;
   }
-  ping() {
-    return this.get('SELECT 1 AS ok')?.ok === 1;
+  ping(): boolean {
+    return this.get<{ ok: number }>('SELECT 1 AS ok')?.ok === 1;
   }
-  close() {
+  close(): void {
     if (this.closed) return;
     this.sqlite.close();
     this.statements.clear();

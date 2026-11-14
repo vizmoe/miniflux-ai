@@ -1,55 +1,78 @@
-import type { AiClient } from '../ai/client.js';
-import type { Envelope } from '../ai/protocol.js';
-import type { FeatureKind, GenerationFailures } from '../db/types.js';
-import type {
-  GenerationSource,
-  Specifications,
-  GenerationExecution,
-  GenerationRun,
-  GeneratedArtifact,
-  GenerationResult,
-  FeatureTracks,
-  GenerateCall,
-  CallStat,
-  TranslationSpecification,
-  TranslationInspection,
-  TranslationMember,
-  SummarySpecification,
-  SummaryMember,
-} from './types.js';
 import { MAX_SPLIT_DEPTH } from '../config/constants.js';
 import { isOverflow } from '../ai/client.js';
+import type { AiClient, CallStat } from '../ai/client.js';
 import { parseTopLevel } from '../ai/protocol.js';
+import type { Envelope } from '../ai/protocol.js';
 import { halves, joinTranslation, splitSentences } from '../ai/text.js';
 import { artifactStats } from '../ai/stats.js';
+import type {
+  AiExecution,
+  ArtifactStats,
+  FeatureKind,
+  SummaryPayload,
+  TranslationPayload,
+} from '../db/documents.js';
+import type { WorkOrder } from '../runtime/concurrency.js';
 import { WorkError } from '../obs/errors.js';
-const invalid = (kind: FeatureKind) =>
+import type {
+  GenerationSource,
+  GenerationSpecifications,
+  SummaryMember,
+  SummarySpecification,
+  TranslationMember,
+  TranslationInspection,
+  TranslationSpecification,
+} from './types.js';
+
+export type GeneratedArtifact = { ai_stats: ArtifactStats } & (
+  | { kind: 'translation'; payload: TranslationPayload }
+  | { kind: 'summary'; payload: SummaryPayload }
+);
+export interface GenerationResult {
+  artifacts: GeneratedArtifact[];
+  failures: Partial<Record<FeatureKind, WorkError>>;
+}
+interface Execution {
+  ai: AiExecution;
+  order: WorkOrder;
+  signal: AbortSignal;
+  context: { feed_title: string; primary_language: string | null };
+  sections?: string[][];
+}
+interface GenerationAttempt {
+  execution: Execution;
+  track: CallStat[];
+  call: Call;
+  depth: number;
+  seed?: unknown;
+  seedError?: WorkError;
+  repairAllowed?: boolean;
+}
+const invalid = (kind: string) =>
   new WorkError(`${kind}_invalid`, 'validation', true);
 export class ArtifactGenerator {
-  client;
-  degraded;
-  constructor(client: AiClient, degraded: (depth: number) => void = () => {}) {
-    this.client = client;
-    this.degraded = degraded;
-  }
+  constructor(
+    private readonly client: AiClient,
+    private readonly degraded: (depth: number) => void = () => {},
+  ) {}
   async generate(
     source: GenerationSource,
-    specs: Specifications,
-    execution: GenerationExecution,
+    specs: GenerationSpecifications,
+    execution: Execution,
   ): Promise<GenerationResult> {
     if (!specs.translation && !specs.summary)
       throw new Error('no_requested_outputs');
-    const tracks: FeatureTracks = {
+    const tracks: Record<FeatureKind, CallStat[]> = {
       translation: [],
       summary: [],
     };
     const kinds = (['translation', 'summary'] as const).filter((k) => specs[k]);
-    const call: GenerateCall = async (
-      envelope,
-      instruction,
-      members,
-      track,
-    ) => {
+    const call = async (
+      envelope: Envelope,
+      instruction: string,
+      members: string[],
+      track: CallStat[],
+    ): Promise<Record<string, unknown>> => {
       const value = await this.client.call(
         execution.ai,
         instruction,
@@ -85,7 +108,8 @@ export class ArtifactGenerator {
           : {}),
       },
     };
-    let seed, overflow;
+    let seed: Record<string, unknown> | undefined,
+      overflow: WorkError | undefined;
     const shared: CallStat[] = [];
     try {
       seed = await call(
@@ -99,8 +123,8 @@ export class ArtifactGenerator {
       overflow = error;
     }
     for (const kind of kinds) tracks[kind].push(...shared);
-    const artifacts: GeneratedArtifact[] = [];
-    const failures: GenerationFailures = {};
+    const artifacts: GeneratedArtifact[] = [],
+      failures: GenerationResult['failures'] = {};
     // One member's repair or aggregation cannot regenerate its valid sibling.
     for (const kind of kinds) {
       execution.signal.throwIfAborted();
@@ -122,11 +146,11 @@ export class ArtifactGenerator {
     }
     return { artifacts, failures };
   }
-  async generateMember(
+  private async generateMember(
     kind: FeatureKind,
     source: GenerationSource,
-    specs: Specifications,
-    run: GenerationRun,
+    specs: GenerationSpecifications,
+    run: GenerationAttempt,
   ): Promise<GeneratedArtifact> {
     if (kind === 'translation') {
       const spec = specs.translation!;
@@ -150,24 +174,24 @@ export class ArtifactGenerator {
       ai_stats: artifactStats(run.track),
     };
   }
-  depth(value: number) {
+  private depth(value: number): void {
     if (value > MAX_SPLIT_DEPTH)
       throw new WorkError('split_depth_exceeded', 'validation', false);
     if (value > 0) this.degraded(value);
   }
-  summaryOutput(spec: SummarySpecification) {
+  private summaryOutput(spec: SummarySpecification) {
     return {
       output_language: spec.outputLanguage,
       format: spec.format,
       max_units: spec.maxUnits,
     };
   }
-  translationEnvelope(
+  private translationEnvelope(
     source: GenerationSource,
     spec: TranslationSpecification,
     titleRequested: boolean,
-    context: GenerationExecution['context'],
-  ): Envelope<'generate_artifacts'> {
+    context: Execution['context'],
+  ): Envelope {
     return {
       protocol_version: 1,
       operation: 'generate_artifacts',
@@ -182,11 +206,11 @@ export class ArtifactGenerator {
       },
     };
   }
-  async translation(
+  private async translation(
     source: GenerationSource,
     spec: TranslationSpecification,
     titleRequested: boolean,
-    run: GenerationRun,
+    run: GenerationAttempt,
   ): Promise<TranslationMember> {
     const { execution, track, call, depth, seed, seedError } = run;
     this.depth(depth);
@@ -225,18 +249,18 @@ export class ArtifactGenerator {
       splitError,
     );
   }
-  async repairTranslation(
+  private async repairTranslation(
     source: GenerationSource,
     spec: TranslationSpecification,
     checked: TranslationInspection,
-    run: GenerationRun,
+    run: GenerationAttempt,
   ): Promise<TranslationMember> {
     const { execution, track, call, depth, repairAllowed = true } = run;
     const target = {
       title: checked.missingTitle ? source.title : '',
       blocks: source.blocks.filter((b) => checked.missingIds.includes(b.id)),
     };
-    let replacement;
+    let replacement: TranslationMember | undefined;
     if (repairAllowed) {
       try {
         const envelope: Envelope = {
@@ -310,7 +334,7 @@ export class ArtifactGenerator {
       ),
     };
   }
-  sourceGroups(
+  private sourceGroups(
     source: GenerationSource,
     sections?: string[][],
   ): GenerationSource[] | null {
@@ -323,7 +347,7 @@ export class ArtifactGenerator {
       return split.map((blocks) => ({ title: source.title, blocks }));
     }
     if (source.blocks.length === 1) {
-      const b = source.blocks[0],
+      const b = source.blocks[0]!,
         parts = halves(splitSentences(b.text));
       if (parts)
         return parts.map((p) => ({
@@ -333,15 +357,15 @@ export class ArtifactGenerator {
     }
     return null;
   }
-  async splitTranslation(
+  private async splitTranslation(
     source: GenerationSource,
     spec: TranslationSpecification,
     titleRequested: boolean,
-    run: GenerationRun,
+    run: GenerationAttempt,
     error: WorkError,
   ): Promise<TranslationMember> {
     const { execution, track, call, depth } = run;
-    let inputs;
+    let inputs: Array<{ source: GenerationSource; title: boolean }>;
     if (titleRequested && source.blocks.length === 1)
       inputs = [
         { source: { title: source.title, blocks: [] }, title: true },
@@ -404,7 +428,7 @@ export class ArtifactGenerator {
     const titles = results.flatMap((r) =>
       r.title === undefined ? [] : [r.title],
     );
-    const value = {
+    const value: TranslationMember = {
       ...(titleRequested
         ? { title: joinTranslation(titles, source.title) }
         : {}),
@@ -422,11 +446,11 @@ export class ArtifactGenerator {
       throw invalid('translation');
     return value;
   }
-  async summary(
+  private async summary(
     source: GenerationSource,
     original: GenerationSource,
     spec: SummarySpecification,
-    run: GenerationRun,
+    run: GenerationAttempt,
   ): Promise<SummaryMember> {
     const {
       execution,
@@ -506,17 +530,17 @@ export class ArtifactGenerator {
       });
     }
   }
-  async splitSummary(
+  private async splitSummary(
     source: GenerationSource,
     original: GenerationSource,
     spec: SummarySpecification,
-    run: GenerationRun,
+    run: GenerationAttempt,
     error: WorkError,
   ): Promise<SummaryMember> {
     const { execution, track, call, depth } = run;
     const groups = this.sourceGroups(source, execution.sections);
     if (!groups) throw error;
-    const results = [];
+    const results: SummaryMember[] = [];
     for (const group of groups)
       results.push(
         await this.summary(group, original, spec, {
@@ -536,13 +560,13 @@ export class ArtifactGenerator {
       depth + 1,
     );
   }
-  async mergeSummaries(
+  private async mergeSummaries(
     partials: string[],
     original: GenerationSource,
     spec: SummarySpecification,
-    execution: GenerationExecution,
+    execution: Execution,
     track: CallStat[],
-    call: GenerateCall,
+    call: Call,
     depth: number,
   ): Promise<SummaryMember> {
     this.depth(depth);
@@ -570,11 +594,11 @@ export class ArtifactGenerator {
     } catch (error) {
       if (!isOverflow(error) || partials.length <= 2) throw error;
       const groups = halves(partials)!;
-      const reduced = [];
+      const reduced: string[] = [];
       for (const group of groups)
         reduced.push(
           group.length === 1
-            ? group[0]
+            ? group[0]!
             : summaryText(
                 await this.mergeSummaries(
                   group,
@@ -604,6 +628,12 @@ export class ArtifactGenerator {
     }
   }
 }
-export function summaryText(value: SummaryMember) {
+type Call = (
+  envelope: Envelope,
+  instruction: string,
+  members: string[],
+  track: CallStat[],
+) => Promise<Record<string, unknown>>;
+export function summaryText(value: SummaryMember): string {
   return value.format === 'paragraph' ? value.text : value.items.join('\n');
 }

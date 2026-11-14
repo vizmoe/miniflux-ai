@@ -1,10 +1,14 @@
-import type { SummaryWork } from '../../db/types.js';
-import type { SummarySpecification } from '../../generation/types.js';
 import { z } from 'zod';
 import { displayText, absoluteUrls } from '../../ai/text.js';
 import { countContentUnits } from '../../html/units.js';
+import type { SummaryWork } from '../../db/documents.js';
 import { summaryArtifactSchema } from '../../db/documents.js';
-export const summaryEligibility = (sourceUnits: number, minimum: number) =>
+import type { SummarySpecification } from '../../generation/types.js';
+
+export const summaryEligibility = (
+  sourceUnits: number,
+  minimum: number,
+): 'content_too_short' | null =>
   sourceUnits < minimum ? 'content_too_short' : null;
 const text = z.string().refine(displayText);
 const member = z.discriminatedUnion('format', [
