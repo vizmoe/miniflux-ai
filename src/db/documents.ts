@@ -242,7 +242,7 @@ const outcome = z.discriminatedUnion('status', [
 ]);
 export const translationArtifactSchema = z
   .object({
-    schema_version: version,
+    schema_version: z.union([version, z.literal(2)]),
     title: outcome.nullable(),
     blocks: z.array(
       z.discriminatedUnion('status', [

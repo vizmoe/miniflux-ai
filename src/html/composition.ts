@@ -3,7 +3,7 @@ import type { Source } from '../source/index.js';
 import { isDeepStrictEqual } from 'node:util';
 import { expandTemplate } from '../config/primitives.js';
 import { parseSource } from './dom.js';
-import { extractSemanticBlocks } from './blocks.js';
+import { extractSemanticBlocks, extractTranslationBlocks } from './blocks.js';
 import {
   computeSourceIntegritySignature,
   summaryMarker,
@@ -43,12 +43,15 @@ function insertSummary(root: Element, summary: SummaryArtifact) {
   return id;
 }
 export function compose(source: Source, artifacts: Artifact[]) {
-  const root = parseSource(source.content),
-    plan = extractSemanticBlocks(root);
+  const root = parseSource(source.content);
+  const translation = artifacts.find((a) => a.kind === 'translation');
+  const plan =
+    translation?.payload.schema_version === 2
+      ? extractTranslationBlocks(root)
+      : extractSemanticBlocks(root);
   const markers = [];
   const sourceSignature = computeSourceIntegritySignature(root);
   let title = source.title;
-  const translation = artifacts.find((a) => a.kind === 'translation');
   if (translation?.kind === 'translation') {
     if (
       !isDeepStrictEqual(
@@ -65,7 +68,11 @@ export function compose(source: Source, artifacts: Artifact[]) {
     // Reverse insertion preserves adjacency when two residuals have the same owner.
     for (const block of [...translation.payload.blocks].reverse())
       if (block.status === 'translated') {
-        const id = translationMarker(translation.marker_token, block.id);
+        const id = translationMarker(
+          translation.marker_token,
+          block.id,
+          translation.payload.schema_version,
+        );
         plan.insert(block.id, id, block.text);
         markers.push(id);
       }

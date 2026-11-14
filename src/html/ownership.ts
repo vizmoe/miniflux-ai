@@ -2,6 +2,7 @@ import type { FeatureKind } from '../db/types.js';
 export interface Ownership {
   marker_token: string;
   kind: FeatureKind;
+  payload?: { schema_version: number };
 }
 import { WorkError } from '../obs/errors.js';
 import {
@@ -10,11 +11,16 @@ import {
   meaningfulChildren,
   parseSource,
 } from './dom.js';
+import { isGeneratedInline } from './inline.js';
 import { allowedSourceAttributes } from './minifluxSanitizer.js';
 const markerPattern =
-  /^mfai-v1-(summary|translation)-([a-f0-9]{32})(?:-([a-f0-9]{12}))?$/;
-export function translationMarker(token: string, blockId: string) {
-  return `mfai-v1-translation-${token}-${blockId}`;
+  /^mfai-v([12])-(summary|translation)-([a-f0-9]{32})(?:-([a-f0-9]{12}))?$/;
+export function translationMarker(
+  token: string,
+  blockId: string,
+  version: 1 | 2 = 1,
+) {
+  return `mfai-v${version}-translation-${token}-${blockId}`;
 }
 export function summaryMarker(token: string) {
   return `mfai-v1-summary-${token}`;
@@ -24,7 +30,7 @@ function invalid(): never {
 }
 function ownedMarker(
   el: Element,
-  tokens: Map<string, FeatureKind>,
+  tokens: Map<string, Ownership>,
   seen: Set<string>,
 ) {
   const id = el.getAttribute('id')!;
@@ -32,8 +38,10 @@ function ownedMarker(
   if (!token || !tokens.has(token)) return null;
   const match = markerPattern.exec(id);
   if (
-    match?.[2] !== token ||
-    match[1] !== tokens.get(token) ||
+    match?.[3] !== token ||
+    match[2] !== tokens.get(token)?.kind ||
+    Number(match[1]) !== (tokens.get(token)?.payload?.schema_version ?? 1) ||
+    (match[1] === '2' && match[2] !== 'translation') ||
     el.localName !== 'sup' ||
     el.childNodes.length ||
     seen.has(id)
@@ -41,7 +49,13 @@ function ownedMarker(
     invalid();
   const parent = el.parentElement;
   if (!parent) invalid();
-  return { id, kind: match[1], blockId: match[3], parent };
+  return {
+    id,
+    kind: match[2],
+    blockId: match[4],
+    formatted: match[1] === '2',
+    parent,
+  };
 }
 function summaryRegion(
   root: Element,
@@ -68,19 +82,23 @@ function summaryRegion(
     invalid();
   return [parent];
 }
-function inlineTranslationRegion(el: Element): ChildNode[] {
+function inlineTranslationRegion(el: Element, formatted: boolean): ChildNode[] {
   const before = el.previousSibling;
   if (!before || !isElement(before) || before.localName !== 'br') invalid();
   const nodes: ChildNode[] = [before, el];
   for (let n = el.nextSibling; n; n = n.nextSibling) {
-    if (n.nodeType !== 3) invalid();
+    if (formatted ? !isGeneratedInline(n) : n.nodeType !== 3) invalid();
     nodes.push(n);
   }
   if (nodes.length === 2 || !nodes.slice(2).some((n) => n.textContent?.trim()))
     invalid();
   return nodes;
 }
-function blockTranslationRegion(el: Element, parent: Element): ChildNode[] {
+function blockTranslationRegion(
+  el: Element,
+  parent: Element,
+  formatted: boolean,
+): ChildNode[] {
   if (
     ![
       'p',
@@ -97,7 +115,11 @@ function blockTranslationRegion(el: Element, parent: Element): ChildNode[] {
     meaningfulChildren(parent)[0] !== el
   )
     invalid();
-  if (Array.from(parent.childNodes).some((n) => n !== el && n.nodeType !== 3))
+  if (
+    Array.from(parent.childNodes).some(
+      (n) => n !== el && (formatted ? !isGeneratedInline(n) : n.nodeType !== 3),
+    )
+  )
     invalid();
   if (!parent.textContent?.trim()) invalid();
   const previous = parent.previousSibling;
@@ -123,7 +145,7 @@ function disjointRegions(regions: ChildNode[][]) {
 }
 /** Validate every region before removing any; an unknown token is always Source. */
 export function projectSource(root: Element, ownership: Ownership[]) {
-  const tokens = new Map(ownership.map((o) => [o.marker_token, o.kind]));
+  const tokens = new Map(ownership.map((o) => [o.marker_token, o]));
   const seen = new Set<string>(),
     translationBlocks = new Set();
   const regions: ChildNode[][] = [],
@@ -131,7 +153,7 @@ export function projectSource(root: Element, ownership: Ownership[]) {
   for (const el of Array.from(root.querySelectorAll('[id]'))) {
     const marker = ownedMarker(el, tokens, seen);
     if (!marker) continue;
-    const { id, kind, blockId, parent } = marker;
+    const { id, kind, blockId, formatted, parent } = marker;
     seen.add(id);
     markers.push(id);
     if (kind === 'summary') {
@@ -142,7 +164,9 @@ export function projectSource(root: Element, ownership: Ownership[]) {
     translationBlocks.add(blockId);
     const inline = ['li', 'td', 'th', 'caption'].includes(parent.localName);
     regions.push(
-      inline ? inlineTranslationRegion(el) : blockTranslationRegion(el, parent),
+      inline
+        ? inlineTranslationRegion(el, formatted)
+        : blockTranslationRegion(el, parent, formatted),
     );
   }
   for (const node of disjointRegions(regions)) node.remove();

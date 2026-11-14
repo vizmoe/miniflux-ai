@@ -53,7 +53,7 @@ docker compose up -d --no-build
 
 The complete configuration contract and defaults are defined in [the configuration schema](src/config/index.ts), with [scope predicates](src/config/scope.ts) and [prompt templates](src/config/prompts.ts) alongside it. Unknown keys and duplicate YAML keys are rejected.
 
-- **Translation** writes translated blocks and a translated title alongside the retained source. `output_language` supplies the shared output language; `features.translation.target_language` can override it.
+- **Translation** writes translated blocks and a translated title alongside the retained source. It preserves Miniflux-supported inline formatting, explicit line breaks, links, and inline code. Responses that lose formatting are repaired or rejected before saving. `output_language` supplies the shared output language; `features.translation.target_language` can override it. Existing translations remain readable; reprocess their translation feature to regenerate them with formatting.
 - **Summary** supports paragraph or bullet output, a minimum source size, an output-size limit, and an optional schedule.
 - **Processing rules** in the console select all feeds or selected feeds and manage allowlists and blocklists. YAML can additionally express content and language predicates. Rules are ordered; the first matching rule determines the outcome.
 - **Models** supports multiple providers. Higher priority is tried first; list order breaks ties. Failures can put providers into cooldown. A blank API key on an existing, unchanged provider endpoint retains its saved key.
@@ -124,7 +124,7 @@ The persistent state is `/app/data` in the image and `./data` when running local
 
 Run one service instance per data directory and Miniflux account. An OS file lock prevents concurrent writers. The database records account identity; changing the configured account or base URL is checked before work resumes. The management interface provides the base-URL confirmation operation for an intentional move of the same account.
 
-Back up both the configuration directory and the entire data volume. For a straightforward filesystem backup, stop the service first and preserve the database together with any WAL/SHM files. Keep a backup before an upgrade; do not edit applied migration files. To roll back, use the earlier image and a compatible pre-upgrade data backup.
+Back up both the configuration directory and the entire data volume. For a straightforward filesystem backup, stop the service first and preserve the database together with any WAL/SHM files. Keep a backup before an upgrade; do not edit applied migration files. Translation artifacts now store formatting information that older binaries cannot read. To roll back, use the earlier image and a compatible pre-upgrade data backup.
 
 `GET /healthz` is the liveness check used by Docker, `GET /readyz` reports processing readiness, and `/metrics` serves Prometheus metrics. Logs are structured JSON. Metrics are not protected by the admin token; restrict their exposure in your proxy when needed.
 

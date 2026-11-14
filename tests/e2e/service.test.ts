@@ -10,6 +10,10 @@ import {
 } from '../helpers/harness.js';
 import { retrySnapshot } from '../../src/config/snapshots.js';
 import type { ScopeView, ModelView, EntryDetail } from '../../web/types.js';
+import { extractTranslationBlocks } from '../../src/html/blocks.js';
+import { parseSource } from '../../src/html/dom.js';
+import { computeSourceIntegritySignature } from '../../src/html/ownership.js';
+import { canonicalSanitizerTree } from '../../src/html/minifluxSanitizer.js';
 
 let harness: Awaited<ReturnType<typeof startHarness>>;
 beforeEach(async () => {
@@ -33,8 +37,7 @@ function api(path: string, method = 'GET', body?: unknown) {
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
 }
-async function ingestExample() {
-  const entry = exampleEntry();
+async function ingestExample(entry = exampleEntry()) {
   const original = entry.content;
   harness.entries.set(entry.id, entry);
   const body = JSON.stringify({ entries: [entry] });
@@ -152,6 +155,74 @@ it('receives a signed webhook, generates both features, and preserves source on 
   expect(detail.source.title).toBe('A scientific discovery');
   expect(detail.source.content).toBe(original);
   expect(detail.tasks).toHaveLength(2);
+});
+
+it('repairs flattened Telegram translations before storing them and preserves formatting on rerender', async () => {
+  const entry = exampleEntry();
+  entry.content =
+    (
+      await readFile(
+        new URL('../fixtures/telegram-surge.html', import.meta.url),
+        'utf8',
+      )
+    ).trim() +
+    '<p>Added <code>h3=true</code> in <a href="https://example.test/manual">the proxy editor</a>.</p>';
+  const blocks = extractTranslationBlocks(parseSource(entry.content)).blocks;
+  harness.aiReplies.set('generate_artifacts', [
+    {
+      translation: {
+        title: '科学发现',
+        blocks: blocks.map((block) => ({
+          id: block.id,
+          text: '这份译文丢失了全部格式。',
+        })),
+      },
+      summary: {
+        format: 'paragraph',
+        text: 'Researchers reported a scientific discovery.',
+      },
+    },
+  ]);
+  const { original } = await ingestExample(entry);
+  expect(harness.aiOperations).toContain('repair_translation');
+  const stored = harness.writes[0];
+  const root = parseSource(stored.content);
+  const markers = root.querySelectorAll('sup[id^="mfai-v2-translation-"]');
+  expect(markers).toHaveLength(2);
+  const announcement = markers[0].parentElement!;
+  expect(announcement.querySelectorAll('br')).toHaveLength(22);
+  expect(announcement.querySelector('strong')?.textContent).toBe(
+    '这是已恢复的中文译文。',
+  );
+  expect(markers[1].parentElement!.querySelector('code')?.textContent).toBe(
+    'h3=true',
+  );
+  expect(
+    markers[1].parentElement!.querySelector('a')?.getAttribute('href'),
+  ).toBe('https://example.test/manual');
+  expect(root.textContent).not.toContain('⟦mfai:');
+  expect(root.textContent).not.toContain('这份译文丢失了全部格式。');
+  const artifacts = harness.service.repository.currentArtifacts(entry.id);
+  expect(
+    artifacts.find((artifact) => artifact.kind === 'translation')?.payload
+      .schema_version,
+  ).toBe(2);
+  const detail = (await (await api('/admin/entries/1')).json()) as EntryDetail;
+  expect(computeSourceIntegritySignature(detail.source.content)).toEqual(
+    computeSourceIntegritySignature(original),
+  );
+  const task = harness.service.repository.requestRender(
+    entry.id,
+    retrySnapshot(harness.service.config),
+  );
+  harness.service.queue.tick();
+  await expect
+    .poll(() => harness.service.repository.task(task.id)?.state)
+    .toBe('done');
+  expect(harness.writes).toHaveLength(2);
+  expect(canonicalSanitizerTree(harness.writes[1].content)).toEqual(
+    canonicalSanitizerTree(stored.content),
+  );
 });
 
 it('publishes a digest and exposes the Atom provisioning feed', async () => {

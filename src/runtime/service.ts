@@ -32,7 +32,10 @@ import {
 import { LanguageDetector } from '../lang/index.js';
 import { LanguageAnalyzer } from '../lang/review.js';
 import { Renderer } from '../render/index.js';
-import { extractSemanticBlocks } from '../html/blocks.js';
+import {
+  extractSemanticBlocks,
+  extractTranslationBlocks,
+} from '../html/blocks.js';
 import { parseSource } from '../html/dom.js';
 import { EntryLock } from './concurrency.js';
 import { AdmissionPolicy } from './admission.js';
@@ -228,7 +231,9 @@ export async function createService(
           entry = repository.entry(task.entry_id)!;
         const loaded = await source.load(entry.entry_id, context.signal),
           root = parseSource(loaded.content),
-          plan = extractSemanticBlocks(root),
+          plan = payload.translation
+            ? extractTranslationBlocks(root)
+            : extractSemanticBlocks(root),
           input = { title: loaded.title, blocks: plan.blocks };
         assertSourceCurrent(entry.source_fingerprint, loaded);
         const fingerprint = sourceFingerprint(loaded);

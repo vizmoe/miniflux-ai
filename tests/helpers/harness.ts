@@ -10,6 +10,8 @@ import { stringify } from 'yaml';
 import { createService } from '../../src/runtime/service.js';
 import { buildServer } from '../../src/server/index.js';
 import { YamlConfiguration } from '../../src/config/store.js';
+import { sanitize } from '../../src/html/minifluxSanitizer.js';
+import type { Operation } from '../../src/ai/protocol.js';
 
 export const adminToken = 'local-test-admin-token';
 export const webhookSecret = 'local-test-webhook-secret';
@@ -62,6 +64,21 @@ export async function startHarness(port = 0) {
   const writes: { id: number; title: string; content: string }[] = [];
   const imports: Record<string, unknown>[] = [];
   const aiOperations: string[] = [];
+  const aiReplies = new Map<Operation, unknown[]>();
+  const translatedBlocks = (blocks: { id: string; text: string }[]) =>
+    blocks.map((block) => ({
+      id: block.id,
+      text: block.text
+        .split(/(⟦mfai:[^⟧]*⟧)/u)
+        .map((part) =>
+          part.startsWith('⟦mfai:')
+            ? part
+            : part.trim()
+              ? '这是已恢复的中文译文。'
+              : part,
+        )
+        .join(''),
+    }));
   const feed = exampleEntry().feed;
   const digestFeed = {
     ...feed,
@@ -113,7 +130,8 @@ export async function startHarness(port = 0) {
       if (request.method === 'PUT') {
         const patch = await bodyOf(request);
         if (typeof patch.title === 'string') entry.title = patch.title;
-        if (typeof patch.content === 'string') entry.content = patch.content;
+        if (typeof patch.content === 'string')
+          entry.content = sanitize(patch.content, entry.url);
         writes.push({ id, title: entry.title, content: entry.content });
         return send(entry, 201);
       }
@@ -142,10 +160,7 @@ export async function startHarness(port = 0) {
                     ...(envelope.requested_outputs.translation.title_requested
                       ? { title: '科学发现' }
                       : {}),
-                    blocks: envelope.source.blocks.map((b) => ({
-                      id: b.id,
-                      text: '这是已恢复的中文译文。',
-                    })),
+                    blocks: translatedBlocks(envelope.source.blocks),
                   },
                 }
               : {}),
@@ -157,6 +172,16 @@ export async function startHarness(port = 0) {
                   },
                 }
               : {}),
+          };
+          break;
+        case 'repair_translation':
+          result = {
+            translation: {
+              ...(envelope.repair_targets.title_requested
+                ? { title: '科学发现' }
+                : {}),
+              blocks: translatedBlocks(envelope.source.blocks),
+            },
           };
           break;
         case 'generate_digest_item':
@@ -176,6 +201,8 @@ export async function startHarness(port = 0) {
         default:
           throw new Error(`Unexpected AI operation: ${envelope.operation}`);
       }
+      const replies = aiReplies.get(envelope.operation);
+      if (replies?.length) result = replies.shift();
       return send({
         choices: [
           {
@@ -260,6 +287,7 @@ export async function startHarness(port = 0) {
     writes,
     imports,
     aiOperations,
+    aiReplies,
     url,
     async close() {
       await app.close();

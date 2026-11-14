@@ -7,6 +7,7 @@ import type {
 import { languageIdentity } from '../../config/primitives.js';
 import { isUsableSourceTitle, normalizeText } from '../../html/units.js';
 import { plainText } from '../../ai/text.js';
+import { matchingFormatting } from '../../html/inline.js';
 export function translationEligibility(
   title: string,
   blockCount: number,
@@ -71,7 +72,8 @@ export function inspectTranslation(
   for (const sourceBlock of source.blocks) {
     const b = candidate.blocks.find((v) => v?.id === sourceBlock.id);
     const part = inspectedBlock(b, counts);
-    if (part) result.value.blocks.push(part);
+    if (part && matchingFormatting(sourceBlock.text, part.text))
+      result.value.blocks.push(part);
   }
   if (titleRequested && plainText(candidate.title)) {
     result.value.title = candidate.title;
@@ -95,7 +97,7 @@ export function translationSpecification(
     inspect: inspectTranslation,
     build(value, input, titleRequested) {
       return {
-        schema_version: 1,
+        schema_version: 2,
         title: translatedTitle(value.title, input.title, titleRequested),
         blocks: input.blocks.map((b) => {
           const text = value.blocks.find((v) => v.id === b.id)!.text;

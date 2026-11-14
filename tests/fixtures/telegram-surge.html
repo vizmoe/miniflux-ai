@@ -1,0 +1,28 @@
+<p>
+  <strong>Beta Updates</strong><br /><br />Surge Engine<br /><br />• Added VLESS
+  Encryption (mlkem768x25519plus), including share-link import and proxy editor
+  controls.<br />• Added VLESS XHTTP transport with stream-one, stream-up and
+  packet-up modes over HTTP/1.1, HTTP/2 or HTTP/3, including VLESS Encryption
+  and Vision.<br />• Reduced memory retained after QUIC downloads on lossy
+  networks.<br />• Improved QUIC upload performance and reduced CPU usage when
+  chained through a proxy's UDP relay.<br />• Fixed established VLESS gRPC,
+  HTTP/2 CONNECT and TrustTunnel connections being incorrectly counted as
+  connection setup failures when they ended with an error.<br />• Fixed
+  WebSocket policies failing to connect when their ALPN list included h2 and the
+  server selected it.<br />• Fixed Tailscale connections staying on a relay
+  after a peer restarted because updated peer information was not applied.<br /><br />Surge
+  iOS<br /><br />• The proxy editor now imports share links for all supported
+  proxy protocols, as well as proxy lines copied from Surge profiles;
+  unsupported settings are reported instead of silently omitted.<br />•
+  Reorganized the proxy editor with an Advanced page that indicates settings in
+  use, and added controls for more protocol, TLS, WireGuard, Tailscale and
+  testing settings.<br />• Fixed Always use CONNECT not being saved for HTTPS
+  policies, and corrected when TLS and Block QUIC settings appear.<br />•
+  Updated list layouts and badges, and added member counts for policy groups in
+  the proxy list.<br /><br />Surge Mac<br /><br />• The proxy editor now imports
+  share links for all supported proxy protocols, as well as proxy lines copied
+  from Surge profiles; unsupported settings are reported instead of silently
+  omitted.<br />• Reorganized the proxy editor with a remembered Show Advanced
+  Settings option and controls for more protocol, TLS, WireGuard and Tailscale
+  settings.
+</p>
