@@ -6,7 +6,7 @@ import type {
 } from '../../generation/types.js';
 import { languageIdentity } from '../../config/primitives.js';
 import { isUsableSourceTitle, normalizeText } from '../../html/units.js';
-import { plainText } from '../../ai/text.js';
+import { displayText, plainText } from '../../ai/text.js';
 import { matchingFormatting } from '../../html/inline.js';
 export function translationEligibility(
   title: string,
@@ -75,7 +75,7 @@ export function inspectTranslation(
     if (part && matchingFormatting(sourceBlock.text, part.text))
       result.value.blocks.push(part);
   }
-  if (titleRequested && plainText(candidate.title)) {
+  if (titleRequested && displayText(candidate.title)) {
     result.value.title = candidate.title;
     result.missingTitle = false;
   }

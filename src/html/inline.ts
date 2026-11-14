@@ -7,7 +7,11 @@ const inlineTags = new Set(
     ' ',
   ),
 );
+const tokenPrefix = '⟦mfai:';
 const tokenPattern = /⟦mfai:[^⟧]*⟧/gu;
+export function hasFormattingControls(value: string) {
+  return value.includes(tokenPrefix);
+}
 export function isInlineFormatting(element: Element) {
   return inlineTags.has(element.localName);
 }
@@ -44,7 +48,7 @@ export function inlineFormatter(root: Element) {
     .update(JSON.stringify(canonicalTree(root, allowedSourceAttributes)))
     .digest('hex')
     .slice(0, 12);
-  const prefix = `⟦mfai:${nonce}:`;
+  const prefix = `${tokenPrefix}${nonce}:`;
   if (root.textContent?.includes(prefix))
     throw new Error('format_token_collision');
   const actions = new Map<string, Action>();

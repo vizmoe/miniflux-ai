@@ -225,6 +225,57 @@ it('repairs flattened Telegram translations before storing them and preserves fo
   );
 });
 
+it('repairs title controls and withholds contaminated summaries before write-back', async () => {
+  const entry = exampleEntry();
+  entry.content =
+    '<p><strong>Researchers investigated how plants respond to light.</strong><br>They published their results in a scientific journal.</p>';
+  const blocks = extractTranslationBlocks(parseSource(entry.content)).blocks;
+  const control = blocks[0].text.match(/⟦mfai:[^⟧]*⟧/u)![0];
+  harness.aiReplies.set('generate_artifacts', [
+    {
+      translation: {
+        title: `科学发现 ${control}`,
+        blocks: blocks.map((block) => ({
+          ...block,
+          text: block.text.replace('Researchers', '研究人员'),
+        })),
+      },
+      summary: { format: 'paragraph', text: `New research ${control}` },
+    },
+  ]);
+  const { original } = await ingestExample(entry);
+  expect(harness.aiOperations).toContain('repair_translation');
+  expect(harness.writes[0].title).not.toContain('⟦mfai:');
+  expect(harness.writes[0].content).not.toContain('⟦mfai:');
+  expect(harness.writes[0].content).not.toContain('New research');
+  const artifacts = harness.service.repository.currentArtifacts(entry.id);
+  expect(artifacts).toHaveLength(1);
+  expect(artifacts[0]).toMatchObject({
+    kind: 'translation',
+    payload: { title: { status: 'translated', text: '科学发现' } },
+  });
+  const summary = harness.service.repository
+    .featureStates(entry.id)
+    .find((state) => state.kind === 'summary')!;
+  expect(summary.state).toBe('pending');
+  expect(summary.current_artifact_id).toBeNull();
+  expect(
+    harness.service.repository.task(summary.last_generation_task_id!),
+  ).toMatchObject({
+    state: 'pending',
+    type: 'generate_artifacts',
+    payload: { requested_features: ['summary'] },
+  });
+  expect(
+    computeSourceIntegritySignature(harness.writes[0].content, artifacts),
+  ).toEqual(computeSourceIntegritySignature(original));
+  expect(
+    parseSource(harness.writes[0].content)
+      .querySelector('sup[id^="mfai-v2-translation-"]')!
+      .parentElement!.querySelectorAll('br'),
+  ).toHaveLength(1);
+});
+
 it('publishes a digest and exposes the Atom provisioning feed', async () => {
   await ingestExample();
   const selected = await api('/admin/digests/run', 'POST', { job_id: 'daily' });

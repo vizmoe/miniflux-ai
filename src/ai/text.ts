@@ -1,9 +1,12 @@
 import { normalizeText } from '../html/units.js';
+import { hasFormattingControls } from '../html/inline.js';
 import { absoluteUrlSpans, trimTrailingCharacters } from '../runtime/text.js';
 export const plainText = (value: unknown): value is string =>
   typeof value === 'string' &&
   normalizeText(value).length > 0 &&
   !/<\/?[A-Za-z][^>]*>/.test(value);
+export const displayText = (value: unknown): value is string =>
+  plainText(value) && !hasFormattingControls(value);
 export function absoluteUrls(value: string) {
   const result = new Set<string>();
   for (const { start, end } of absoluteUrlSpans(
