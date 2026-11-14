@@ -10,6 +10,8 @@ SonarQube project `miniflux-ai`, branch `main`, retained analysis `13668605-85d7
 
 The source in `src/` and `admin/` restores original type declarations, comments, access restrictions and console module boundaries while retaining the maintained formatting protocol, artifact compatibility, validation, error handling and admission recovery. The console build also restores content-based asset versions. The upgraded dependencies, toolchain, embedded source maps and delivery configuration remain authoritative. The complete scanned snapshot is preserved separately from the maintained project.
 
+Recovered Vitest and Chromium suites run alongside the reconstruction's regression tests. Historical assertions were adapted for the newer generated-translation and admission contracts and the maintained provider-setup example. The original version-one artifact fixtures remain covered. Standalone historical E2E/soak scripts and the old Sonar upload helper remain in the reference snapshot; the maintained test and delivery commands are documented in [README.md](README.md).
+
 The SQL migrations and migration metadata are preserved byte for byte. Their original hashes are retained in [the migration compatibility fixture](tests/fixtures/migrations.json) and checked by the database tests. Existing databases still need a normal backup before upgrade; schema compatibility alone does not prove every possible production state has been exercised.
 
 Builds now emit source maps with embedded TypeScript for both the server and browser. Keep the Git repository and lockfile as the development source of truth; a runtime image is not a replacement for repository backups.
