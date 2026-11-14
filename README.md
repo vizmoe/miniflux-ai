@@ -2,8 +2,6 @@
 
 A companion service for one Miniflux account. It translates articles, generates summaries, and imports scheduled digests back into Miniflux while preserving the original article content. A browser console manages AI providers, processing rules, entries and tasks.
 
-This repository was recovered from a container image and a matching SonarQube source snapshot. See [RECOVERY.md](RECOVERY.md) for provenance and the limits of the recovery.
-
 ## Run with Docker Compose
 
 1. Create the configuration directory and copy the example:
@@ -37,12 +35,12 @@ This repository was recovered from a container image and a matching SonarQube so
 
 The example starts in provider setup mode. `/healthz` succeeds when the HTTP server is running; `/readyz` remains unavailable until the model, Miniflux account binding and ingestion bootstrap are ready. Saving a provider does not make a test model call.
 
-The recovered service checks Miniflux against the version declared in [the runtime constants](src/config/constants.ts). Use that compatible Miniflux release or validate a deliberate compatibility change before upgrading it. A failed compatibility probe pauses new ingestion and task claims; the service retries the probe and resumes work after recovery. The service supports Chat Completions providers with JSON output, including JSON and SSE transport responses; it does not implement the OpenAI Responses API.
+The service checks Miniflux against the version declared in [the runtime constants](src/config/constants.ts). Use that compatible Miniflux release or validate a deliberate compatibility change before upgrading it. A failed compatibility probe pauses new ingestion and task claims; the service retries the probe and resumes work after recovery. The service supports Chat Completions providers with JSON output, including JSON and SSE transport responses; it does not implement the OpenAI Responses API.
 
-For an image published by the included workflow:
+For the published GHCR image, authenticate first if the package is private using credentials with package-read access (`docker login ghcr.io`):
 
 ```sh
-export MINIFLUX_AI_IMAGE=ghcr.io/your-owner/miniflux-ai:0.1.0
+export MINIFLUX_AI_IMAGE=ghcr.io/vizmoe/miniflux-ai:latest
 docker compose pull
 docker compose up -d --no-build
 ```
@@ -152,7 +150,7 @@ mise exec -- pnpm docker:build
 mise exec -- pnpm docker:test
 ```
 
-The scripts in [package.json](package.json) are the authoritative check and build entry points. `pnpm check` includes strict typing, lint, formatting, unit/database coverage, a clean build and HTTP integration tests. The browser test requires Playwright Chromium. The container test accepts another image name, for example `pnpm docker:test miniflux-ai:recovered`.
+The scripts in [package.json](package.json) are the authoritative check and build entry points. `pnpm check` includes strict typing, lint, formatting, unit/database coverage, a clean build and HTTP integration tests. The browser test requires Playwright Chromium. The container test accepts another image name, for example `pnpm docker:test miniflux-ai:local`.
 
 Tests use isolated temporary SQLite databases and controlled local Miniflux/AI HTTP fixtures. They do not prove compatibility with a live provider account or a running upstream Miniflux deployment. The container smoke test runs without an external network and checks non-root startup, health, browser assets, authentication, embedded source maps, clean shutdown and data persistence across restart. Coverage, browser screenshots and Playwright traces are generated into ignored artifact directories.
 
