@@ -13,12 +13,17 @@ import {
   MINIFLUX_SUPPORTED_VERSION,
   MINIFLUX_VERSION_PROBE_TTL,
 } from '../../src/config/constants.js';
-import type { ScopeView, ModelView, EntryDetail } from '../../web/types.js';
+import type {
+  Scopes as ScopeView,
+  Model as ModelView,
+} from '../../admin/types.js';
+import type { SourceProjection } from '../../src/source/index.js';
 import { extractTranslationBlocks } from '../../src/html/blocks.js';
 import { parseSource } from '../../src/html/dom.js';
 import { computeSourceIntegritySignature } from '../../src/html/ownership.js';
 import { canonicalSanitizerTree } from '../../src/html/minifluxSanitizer.js';
 
+type EntryDetail = { source: SourceProjection; tasks: unknown[] };
 let harness: Awaited<ReturnType<typeof startHarness>>;
 beforeEach(async () => {
   harness = await startHarness();

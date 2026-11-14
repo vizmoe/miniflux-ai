@@ -156,7 +156,7 @@ The scripts in [package.json](package.json) are the authoritative check and buil
 
 Tests use isolated temporary SQLite databases and controlled local Miniflux/AI HTTP fixtures. They do not prove compatibility with a live provider account or a running upstream Miniflux deployment. The container smoke test runs without an external network and checks non-root startup, health, browser assets, authentication, embedded source maps, clean shutdown and data persistence across restart. Coverage, browser screenshots and Playwright traces are generated into ignored artifact directories.
 
-Server code lives in `src/`, browser source in `web/`, migrations in `drizzle/`, and tests in `tests/`. `pnpm build` recreates `dist/`, including browser assets, declaration files and source maps with embedded source text. Use `pnpm db:generate` after an intentional schema change and review the generated migration before applying it.
+Server code lives in `src/`, browser source in `admin/`, migrations in `drizzle/`, and tests in `tests/`. `pnpm build` recreates `dist/`, including browser assets, declaration files and source maps with embedded source text. Use `pnpm db:generate` after an intentional schema change and review the generated migration before applying it.
 
 ## CI and image publishing
 

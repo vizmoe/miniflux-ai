@@ -9,5 +9,5 @@
     "declaration": true
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["tests", "web", "node_modules", "dist"]
+  "exclude": ["tests", "admin", "node_modules", "dist"]
 }

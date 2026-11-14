@@ -8,7 +8,7 @@ RUN --mount=type=cache,target=/root/.npm npm install --global "$(node -p 'requir
 RUN --mount=type=cache,target=/pnpm/store pnpm install --frozen-lockfile --store-dir /pnpm/store
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
-COPY web ./web
+COPY admin ./admin
 COPY scripts/build.mjs scripts/build-admin.mjs ./scripts/
 RUN --mount=type=cache,target=/pnpm/store pnpm build && pnpm prune --prod --config.store-dir=/pnpm/store
 
