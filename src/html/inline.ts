@@ -8,7 +8,7 @@ const inlineTags = new Set(
   ),
 );
 const tokenPrefix = '⟦mfai:';
-const tokenPattern = /⟦mfai:[^⟧]*⟧/gu;
+const tokenPattern = /(⟦mfai:[^⟦⟧]*⟧)/gu;
 export function hasFormattingControls(value: string) {
   return value.includes(tokenPrefix);
 }
@@ -19,6 +19,7 @@ export function matchingFormatting(source: string, translated: string) {
   const expected = source.match(tokenPattern) ?? [];
   const actual = translated.match(tokenPattern) ?? [];
   return (
+    source.split(tokenPrefix).length === translated.split(tokenPrefix).length &&
     expected.length === actual.length &&
     expected.every((token, index) => token === actual[index])
   );
@@ -89,7 +90,7 @@ export function inlineFormatter(root: Element) {
         throw new Error('translation_format_invalid');
       const fragment = document.createDocumentFragment();
       const stack: (Element | DocumentFragment)[] = [fragment];
-      for (const part of translated.split(/(⟦mfai:[^⟧]*⟧)/gu)) {
+      for (const part of translated.split(tokenPattern)) {
         const action = actions.get(part);
         if (!action) {
           stack.at(-1)!.appendChild(document.createTextNode(part));

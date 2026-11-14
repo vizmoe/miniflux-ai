@@ -180,6 +180,38 @@ it('rejects missing, duplicated, reordered or invented formatting before accepti
   }
 });
 
+it('rejects unterminated control prefixes around otherwise valid translation formatting', () => {
+  const source = {
+    title: '',
+    blocks: extractTranslationBlocks(parseSource(minimal)).blocks,
+  };
+  const block = source.blocks[0];
+  for (const text of [
+    block.text + '⟦mfai:',
+    block.text + '⟦mfai:partial',
+    '⟦mfai:unexpected ' + block.text,
+  ]) {
+    const inspected = inspectTranslation(
+      { blocks: [{ id: block.id, text }] },
+      source,
+      false,
+    );
+    expect(inspected.valid).toBe(false);
+    expect(inspected.missingIds).toEqual([block.id]);
+  }
+});
+
+it('keeps literal unclosed prefixes in source prose separate from real formatting controls', () => {
+  const source = '<p>Added example ⟦mfai:literal prefix.<br>Fixed bug.</p>';
+  const { root, artifact } = translated(source);
+  const generated = root.querySelector('sup')!.parentElement!;
+  expect(generated.querySelectorAll('br')).toHaveLength(1);
+  expect(generated.textContent).toContain('⟦mfai:literal prefix.');
+  expect(computeSourceIntegritySignature(root, [artifact])).toEqual(
+    computeSourceIntegritySignature(source),
+  );
+});
+
 it('requires protected inline code to remain unchanged', () => {
   const source = {
     title: '',
