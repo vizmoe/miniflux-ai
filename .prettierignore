@@ -1,0 +1,10 @@
+node_modules
+dist
+pnpm-lock.yaml
+drizzle/meta
+licenses
+THIRD_PARTY_NOTICES.md
+coverage
+artifacts
+playwright-report
+test-results

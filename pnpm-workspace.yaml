@@ -1,0 +1,16 @@
+packages:
+  - .
+
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+  fs-ext: true
+
+catalog:
+  esbuild: 0.28.2
+
+overrides:
+  # GHSA-67mh-4wv8-2f99 in Drizzle's legacy TypeScript loader.
+  '@esbuild-kit/core-utils>esbuild': 'catalog:'
+  # GHSA-g3hv-75wg-m249 in the minimatch version used by ESLint.
+  minimatch@10: 11.0.8

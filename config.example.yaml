@@ -1,0 +1,13 @@
+miniflux:
+  base_url: https://miniflux.example.com
+  api_key: replace-with-your-miniflux-api-key
+
+server:
+  admin_token: replace-with-a-long-random-admin-token
+
+ai:
+  providers: []
+
+ingestion:
+  webhook:
+    enabled: false

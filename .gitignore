@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+/artifacts/
+/data/
+/config/
+/config.yaml
+/.env
+*.log
+.DS_Store
+!/scripts/
+!/scripts/*.mjs
