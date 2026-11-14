@@ -11,6 +11,7 @@ import { createService } from '../../src/runtime/service.js';
 import { buildServer } from '../../src/server/index.js';
 import { YamlConfiguration } from '../../src/config/store.js';
 import { sanitize } from '../../src/html/minifluxSanitizer.js';
+import { MINIFLUX_SUPPORTED_VERSION } from '../../src/config/constants.js';
 import type { Operation } from '../../src/ai/protocol.js';
 
 export const adminToken = 'local-test-admin-token';
@@ -65,6 +66,7 @@ export async function startHarness(port = 0) {
   const imports: Record<string, unknown>[] = [];
   const aiOperations: string[] = [];
   const aiReplies = new Map<Operation, unknown[]>();
+  const upstreamState = { minifluxVersion: MINIFLUX_SUPPORTED_VERSION };
   const translatedBlocks = (blocks: { id: string; text: string }[]) =>
     blocks.map((block) => ({
       id: block.id,
@@ -92,7 +94,8 @@ export async function startHarness(port = 0) {
       response.writeHead(status, { 'content-type': 'application/json' });
       response.end(JSON.stringify(value));
     };
-    if (url.pathname === '/v1/version') return send({ version: '2.3.3' });
+    if (url.pathname === '/v1/version')
+      return send({ version: upstreamState.minifluxVersion });
     if (url.pathname === '/v1/me') return send({ id: 1 });
     if (url.pathname === '/v1/feeds') return send([feed, digestFeed]);
     if (url.pathname === '/v1/categories') return send([feed.category]);
@@ -283,6 +286,7 @@ export async function startHarness(port = 0) {
     root,
     configPath,
     upstream,
+    upstreamState,
     entries,
     writes,
     imports,

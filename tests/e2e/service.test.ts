@@ -9,6 +9,10 @@ import {
   webhookSecret,
 } from '../helpers/harness.js';
 import { retrySnapshot } from '../../src/config/snapshots.js';
+import {
+  MINIFLUX_SUPPORTED_VERSION,
+  MINIFLUX_VERSION_PROBE_TTL,
+} from '../../src/config/constants.js';
 import type { ScopeView, ModelView, EntryDetail } from '../../web/types.js';
 import { extractTranslationBlocks } from '../../src/html/blocks.js';
 import { parseSource } from '../../src/html/dom.js';
@@ -117,6 +121,49 @@ it('serves built console assets and enforces authentication and same-origin prot
     (await fetch(harness.url + '/admin/status', { headers: { cookie } }))
       .status,
   ).toBe(401);
+});
+
+it('pauses queued work and webhooks after an incompatible version probe, then resumes', async () => {
+  const { binding, repository, queue } = harness.service;
+  await queue.stop(0);
+  const deliver = (entry: ReturnType<typeof exampleEntry>) => {
+    harness.entries.set(entry.id, entry);
+    const body = JSON.stringify({ entries: [entry] });
+    return fetch(harness.url + '/webhook/miniflux', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-miniflux-event-type': 'new_entries',
+        'x-miniflux-signature': createHmac('sha256', webhookSecret)
+          .update(body)
+          .digest('hex'),
+      },
+      body,
+    });
+  };
+  expect((await deliver(exampleEntry())).status).toBe(204);
+  const taskId = repository.featureStates(1)[0].last_generation_task_id!;
+  expect(repository.task(taskId)).toMatchObject({
+    state: 'pending',
+    attempts: 0,
+  });
+  const callsBefore = harness.aiOperations.length;
+  harness.upstreamState.minifluxVersion = '99.0.0';
+  binding.now = () => Date.now() + MINIFLUX_VERSION_PROBE_TTL + 1;
+  expect((await fetch(harness.url + '/readyz')).status).toBe(503);
+  queue.start();
+  expect(repository.task(taskId)).toMatchObject({
+    state: 'pending',
+    attempts: 0,
+  });
+  expect((await deliver(exampleEntry(2))).status).toBe(503);
+  expect(repository.entry(2)).toBeUndefined();
+  expect(harness.aiOperations).toHaveLength(callsBefore);
+  expect(harness.writes).toHaveLength(0);
+  harness.upstreamState.minifluxVersion = MINIFLUX_SUPPORTED_VERSION;
+  expect((await fetch(harness.url + '/readyz')).status).toBe(200);
+  await expect.poll(() => harness.writes.length, { timeout: 15_000 }).toBe(1);
+  await expect.poll(() => repository.task(taskId)?.state).toBe('done');
 });
 
 it('receives a signed webhook, generates both features, and preserves source on write-back', async () => {

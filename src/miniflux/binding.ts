@@ -43,7 +43,7 @@ export class BindingController {
     this.now = now;
   }
   get open() {
-    return this.verified && !this.stopped;
+    return this.verified && this.lastStatus.ready && !this.stopped;
   }
   get state() {
     const binding = this.repository.binding();
@@ -111,7 +111,7 @@ export class BindingController {
         version: null,
       };
     }
-    if (!this.verified && !this.stopped && !this.timer) {
+    if (!this.lastStatus.ready && !this.stopped && !this.timer) {
       this.timer = setTimeout(() => {
         this.timer = undefined;
         void this.check().catch(() => {});

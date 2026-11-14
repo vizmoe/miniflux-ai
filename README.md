@@ -37,7 +37,7 @@ This repository was reconstructed from a container image. See [RECOVERY.md](RECO
 
 The example starts in provider setup mode. `/healthz` succeeds when the HTTP server is running; `/readyz` remains unavailable until the model, Miniflux account binding and ingestion bootstrap are ready. Saving a provider does not make a test model call.
 
-The recovered service checks Miniflux against the version declared in [the runtime constants](src/config/constants.ts). Use that compatible Miniflux release or validate a deliberate compatibility change before upgrading it. The service supports Chat Completions providers with JSON output, including JSON and SSE transport responses; it does not implement the OpenAI Responses API.
+The recovered service checks Miniflux against the version declared in [the runtime constants](src/config/constants.ts). Use that compatible Miniflux release or validate a deliberate compatibility change before upgrading it. A failed compatibility probe pauses new ingestion and task claims; the service retries the probe and resumes work after recovery. The service supports Chat Completions providers with JSON output, including JSON and SSE transport responses; it does not implement the OpenAI Responses API.
 
 For an image published by the included workflow:
 
