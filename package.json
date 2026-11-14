@@ -1,0 +1,69 @@
+{
+  "name": "miniflux-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A single-account Miniflux companion for translation, summaries, and digests",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vizmoe/miniflux-ai.git"
+  },
+  "homepage": "https://github.com/vizmoe/miniflux-ai#readme",
+  "bugs": {
+    "url": "https://github.com/vizmoe/miniflux-ai/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=26.8.1 <27"
+  },
+  "packageManager": "pnpm@12.18.0",
+  "scripts": {
+    "dev": "node scripts/build-admin.mjs && tsx watch src/main.ts",
+    "start": "node --single-threaded-gc dist/main.js",
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage --config vitest.coverage.config.ts",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "db:generate": "drizzle-kit generate",
+    "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm build && pnpm test:coverage",
+    "build:admin": "node scripts/build-admin.mjs",
+    "test:admin": "playwright test",
+    "docker:build": "docker build -t miniflux-ai:local .",
+    "docker:test": "node scripts/docker-smoke.mjs"
+  },
+  "dependencies": {
+    "@prometheus-io/client": "0.16.1",
+    "better-sqlite3": "13.1.1",
+    "croner": "11.0.0",
+    "drizzle-orm": "0.45.4",
+    "eld": "2.1.1",
+    "fastify": "5.12.8",
+    "fs-ext": "2.1.1",
+    "linkedom": "0.18.15",
+    "parse5": "8.1.1",
+    "pino": "10.4.0",
+    "yaml": "2.9.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.65.0",
+    "@types/better-sqlite3": "9.6.0",
+    "@types/fs-ext": "2.0.3",
+    "@types/node": "26.6.6",
+    "@typescript/native": "npm:typescript@7.0.2",
+    "@vitest/coverage-v8": "5.1.0",
+    "drizzle-kit": "0.31.11",
+    "esbuild": "catalog:",
+    "eslint": "10.14.0",
+    "prettier": "3.10.1",
+    "tsx": "4.23.15",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
+    "typescript-eslint": "8.72.2",
+    "vitest": "5.1.0"
+  }
+}

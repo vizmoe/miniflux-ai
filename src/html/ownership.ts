@@ -1,0 +1,191 @@
+import { WorkError } from '../obs/errors.js';
+import {
+  canonicalTree,
+  isElement,
+  meaningfulChildren,
+  parseSource,
+} from './dom.js';
+import { isGeneratedInline } from './inline.js';
+import { allowedSourceAttributes } from './minifluxSanitizer.js';
+
+export interface Ownership {
+  kind: 'translation' | 'summary';
+  marker_token: string;
+  payload?: { schema_version: number };
+}
+const markerPattern =
+  /^mfai-v([12])-(summary|translation)-([a-f0-9]{32})(?:-([a-f0-9]{12}))?$/;
+export function translationMarker(
+  token: string,
+  blockId: string,
+  version: 1 | 2 = 1,
+): string {
+  return `mfai-v${version}-translation-${token}-${blockId}`;
+}
+export function summaryMarker(token: string): string {
+  return `mfai-v1-summary-${token}`;
+}
+function invalid(): never {
+  throw new WorkError('source_projection_invalid', 'integrity', false);
+}
+
+function ownedMarker(
+  el: Element,
+  tokens: Map<string, Ownership>,
+  seen: Set<string>,
+) {
+  const id = el.getAttribute('id')!;
+  const token = /[a-f0-9]{32}/.exec(id)?.[0];
+  if (!token || !tokens.has(token)) return null;
+  const match = markerPattern.exec(id);
+  if (
+    match?.[3] !== token ||
+    match[2] !== tokens.get(token)?.kind ||
+    Number(match[1]) !== (tokens.get(token)?.payload?.schema_version ?? 1) ||
+    (match[1] === '2' && match[2] !== 'translation') ||
+    el.localName !== 'sup' ||
+    el.childNodes.length ||
+    seen.has(id)
+  )
+    invalid();
+  const parent = el.parentElement;
+  if (!parent) invalid();
+  return {
+    id,
+    kind: match[2],
+    blockId: match[4],
+    formatted: match[1] === '2',
+    parent,
+  };
+}
+function summaryRegion(
+  root: HTMLElement,
+  el: Element,
+  parent: Element,
+  blockId?: string,
+): Node[] {
+  if (
+    blockId ||
+    parent.localName !== 'blockquote' ||
+    parent.parentElement !== root ||
+    meaningfulChildren(root)[0] !== parent ||
+    meaningfulChildren(parent)[0] !== el
+  )
+    invalid();
+  const children = meaningfulChildren(parent);
+  if (
+    children.length !== 3 ||
+    !isElement(children[1]!) ||
+    children[1]!.localName !== 'p' ||
+    !isElement(children[2]!) ||
+    !['p', 'ul'].includes(children[2]!.localName)
+  )
+    invalid();
+  return [parent];
+}
+function inlineTranslationRegion(el: Element, formatted: boolean): Node[] {
+  const before = el.previousSibling;
+  if (!before || !isElement(before) || before.localName !== 'br') invalid();
+  const nodes: Node[] = [before, el];
+  for (let n = el.nextSibling; n; n = n.nextSibling) {
+    if (formatted ? !isGeneratedInline(n) : n.nodeType !== 3) invalid();
+    nodes.push(n);
+  }
+  if (nodes.length === 2 || !nodes.slice(2).some((n) => n.textContent?.trim()))
+    invalid();
+  return nodes;
+}
+function blockTranslationRegion(
+  el: Element,
+  parent: Element,
+  formatted: boolean,
+): Node[] {
+  if (
+    ![
+      'p',
+      'figcaption',
+      'h1',
+      'h2',
+      'h3',
+      'h4',
+      'h5',
+      'h6',
+      'dt',
+      'dd',
+    ].includes(parent.localName) ||
+    meaningfulChildren(parent)[0] !== el
+  )
+    invalid();
+  if (
+    Array.from(parent.childNodes).some(
+      (n) => n !== el && (formatted ? !isGeneratedInline(n) : n.nodeType !== 3),
+    )
+  )
+    invalid();
+  if (!parent.textContent?.trim()) invalid();
+  const previous = parent.previousSibling;
+  if (
+    !previous ||
+    (parent.localName !== 'p' &&
+      (!isElement(previous) || previous.localName !== parent.localName))
+  )
+    invalid();
+  return [parent];
+}
+function disjointRegions(regions: Node[][]): Node[] {
+  const all = regions.flat();
+  for (let i = 0; i < all.length; i++)
+    for (let j = i + 1; j < all.length; j++)
+      if (
+        all[i] === all[j] ||
+        all[i]!.contains(all[j]!) ||
+        all[j]!.contains(all[i]!)
+      )
+        invalid();
+  return all;
+}
+/** Validate every region before removing any; an unknown token is always Source. */
+export function projectSource(
+  root: HTMLElement,
+  ownership: Ownership[],
+): string[] {
+  const tokens = new Map(ownership.map((o) => [o.marker_token, o]));
+  const seen = new Set<string>(),
+    translationBlocks = new Set<string>();
+  const regions: Node[][] = [],
+    markers: string[] = [];
+  for (const el of Array.from(root.querySelectorAll('[id]'))) {
+    const marker = ownedMarker(el, tokens, seen);
+    if (!marker) continue;
+    const { id, kind, blockId, formatted, parent } = marker;
+    seen.add(id);
+    markers.push(id);
+    if (kind === 'summary') {
+      regions.push(summaryRegion(root, el, parent, blockId));
+      continue;
+    }
+    if (!blockId || translationBlocks.has(blockId)) invalid();
+    translationBlocks.add(blockId);
+    const inline = ['li', 'td', 'th', 'caption'].includes(parent.localName);
+    regions.push(
+      inline
+        ? inlineTranslationRegion(el, formatted)
+        : blockTranslationRegion(el, parent, formatted),
+    );
+  }
+  for (const node of disjointRegions(regions)) (node as ChildNode).remove();
+  return markers;
+}
+export function computeSourceIntegritySignature(
+  content: string | HTMLElement,
+  ownership: Ownership[] = [],
+): unknown {
+  const root = typeof content === 'string' ? parseSource(content) : content;
+  projectSource(root, ownership);
+  return canonicalTree(root, allowedSourceAttributes);
+}
+export function markerShapedIdCount(content: string): number {
+  return Array.from(parseSource(content).querySelectorAll('[id]')).filter((n) =>
+    n.id.startsWith('mfai-'),
+  ).length;
+}

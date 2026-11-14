@@ -1,0 +1,39 @@
+export const SQLITE_DATABASE_FILE = './data/miniflux-ai.db';
+export const INSTANCE_LOCK_FILE = './data/miniflux-ai.lock';
+export const MINIFLUX_SUPPORTED_VERSION = '2.3.3';
+export const MINIFLUX_VERSION_PROBE_TTL = 60_000;
+export const MINIFLUX_WEB_ENTRY_PATH_TEMPLATE =
+  '/feed/{feed_id}/entry/{entry_id}';
+export const DIGEST_JOB_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+export const DIGEST_ALL_ATOM_PATH_TEMPLATE = '/digest/feeds/{job_id}.xml';
+export const DIGEST_CATEGORY_ATOM_PATH_TEMPLATE =
+  '/digest/feeds/{job_id}/categories/{category_id}.xml';
+export const DIGEST_ALL_ENTRY_PATH_TEMPLATE = '/digest/{job_id}/{date}';
+export const DIGEST_CATEGORY_ENTRY_PATH_TEMPLATE =
+  '/digest/{job_id}/categories/{category_id}/{date}';
+export const ELD_DATABASE = 'medium';
+export const LANGUAGE_REVIEW_BATCH_TIMEOUT_MS = 10_000;
+export const LANGUAGE_REVIEW_MAX_SAMPLES = 16;
+export const LANGUAGE_REVIEW_SAMPLE_BYTES = 1024;
+export const LANGUAGE_PART_MIN_UNITS = 20;
+export const LANGUAGE_PART_FULL_WEIGHT_UNITS = 40;
+export const LANGUAGE_PART_SHORT_WEIGHT_FACTOR = 0.25;
+export const LANGUAGE_PART_MAX_WEIGHT = 500;
+export const LANGUAGE_TITLE_WEIGHT_CAP = 50;
+export const UNRELIABLE_WEIGHT_FACTOR = 0.25;
+export const ARTICLE_PRIMARY_SHARE = 0.7;
+export const ARTICLE_PRIMARY_MIN_RELIABLE_PARTS = 1;
+export const SCRIPT_GUARD_MINIMUM_HAN_UNITS = 20;
+export const SCRIPT_GUARD_MINIMUM_HAN_SHARE = 0.35;
+export const KANA_HANGUL_SIGNAL_MINIMUM_UNITS = 8;
+export const KANA_HANGUL_SIGNAL_MINIMUM_CJK_SHARE = 0.2;
+export const AI_ENVELOPE_PROTOCOL_VERSION = 1;
+export const ARTIFACT_MARKER_PROTOCOL_VERSION = 1;
+export const ARTIFACT_MARKER_TOKEN_BYTES = 16;
+export const TRANSLATABLE_BLOCK_MIN_UNITS = 1;
+export const MAX_SPLIT_DEPTH = 6;
+export const WEBHOOK_FEED_RESOLUTION_BUDGET = 20;
+export const FOREGROUND_RESERVED_SLOTS = 1;
+export const ENTRY_RECOVERY_BATCH_SIZE = 100;
+export const ENTRY_RECOVERY_TICK_MS = 5_000;
+export const ENTRY_RECOVERY_RECHECK_MS = 300_000;
